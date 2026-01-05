@@ -1,21 +1,10 @@
-const path = require("path");
-const Database = require("better-sqlite3");
+const { Pool } = require("pg");
 
-// תמיד ייצור/יפתח את ה-DB בתוך תיקיית server
-const dbPath = path.join(__dirname, "retro.db");
-const db = new Database(dbPath);
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: { rejectUnauthorized: false }, // נדרש ב-Render
+});
 
-db.prepare(
-  `
-  CREATE TABLE IF NOT EXISTS notes (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    type TEXT,
-    authorName TEXT,
-    content TEXT,
-    anonymous INTEGER,
-    opened INTEGER
-  )
-`
-).run();
-
-module.exports = db;
+module.exports = {
+  query: (text, params) => pool.query(text, params),
+};
