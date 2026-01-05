@@ -23,3 +23,12 @@ cd server
 npm install
 node index.js
 ```
+
+## Definition of Done (v1.0.0)
+
+- [x] App deployed (FE + BE)
+- [x] API connected in production
+- [x] CORS configured for production domain
+- [x] Environment variables set
+- [x] Git tag v1.0.0
+- [x] README documented
