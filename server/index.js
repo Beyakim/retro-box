@@ -6,7 +6,11 @@ const db = require("./db");
 const express = require("express");
 const app = express();
 const cors = require("cors");
-app.use(cors({ origin: "http://localhost:5173" }));
+app.use(
+  cors({
+    origin: ["http://localhost:5173", "https://retro-box-five.vercel.app"],
+  })
+);
 app.use(express.json());
 
 /**
