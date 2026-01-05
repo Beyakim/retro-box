@@ -1,113 +1,85 @@
-// BOOT: הדפסה לטרמינל כדי לדעת איזה קובץ רץ
-console.log("BOOT: v6-db, file:", __filename);
-
-// ייבוא DB (SQLite) + Express
-const db = require("./db");
-const express = require("express");
-const app = express();
-const cors = require("cors");
-app.use(
-  cors({
-    origin: ["http://localhost:5173", "https://retro-box-five.vercel.app"],
-  })
-);
-app.use(express.json());
-
-/**
- * GET /health
- * בדיקת תקינות: מחזיר שהשרת חי
- */
-app.get("/health", (req, res) => {
-  res.json({ status: "ok", version: "v6-db" });
-});
-
 /**
  * GET /notes
  * מחזיר את כל הפתקים מה-DB
  */
-app.get("/notes", (req, res) => {
-  const rows = db.prepare("SELECT * FROM notes ORDER BY id ASC").all();
+app.get("/notes", async (req, res) => {
+  try {
+    const result = await db.query(`
+      SELECT
+        id,
+        type,
+        author_name AS "authorName",
+        content,
+        anonymous,
+        opened
+      FROM notes
+      ORDER BY id ASC
+    `);
 
-  const result = rows.map((row) => ({
-    id: row.id,
-    type: row.type,
-    authorName: row.authorName,
-    content: row.content,
-    anonymous: Boolean(row.anonymous),
-    opened: Boolean(row.opened),
-  }));
-
-  res.json(result);
+    res.json(result.rows);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "DB fetch failed" });
+  }
 });
 
 /**
  * GET /notes/next
- * מחזיר את הפתק הבא שלא נפתח (opened=0) ומסמן אותו כפתוח (opened=1)
+ * מחזיר את הפתק הבא שלא נפתח ומסמן אותו כפתוח
  */
-app.get("/notes/next", (req, res) => {
-  const nextNote = db
-    .prepare("SELECT * FROM notes WHERE opened = 0 ORDER BY id ASC LIMIT 1")
-    .get();
-
-  if (!nextNote) {
-    return res.status(404).json({ message: "No unopened notes left" });
-  }
-
-  db.prepare("UPDATE notes SET opened = 1 WHERE id = ?").run(nextNote.id);
-
-  res.json({
-    id: nextNote.id,
-    type: nextNote.type,
-    authorName: nextNote.authorName,
-    content: nextNote.content,
-    anonymous: Boolean(nextNote.anonymous),
-    opened: true,
-  });
-});
-
-/**
- * POST /notes
- * מוסיף פתק חדש ל-DB
- * body: { authorName, content, type, anonymous }
- */
-app.post("/notes", async (req, res) => {
+app.get("/notes/next", async (req, res) => {
   try {
-    const { type, authorName, content, anonymous } = req.body;
-
-    const result = await db.query(
+    // נועלים את השורה כדי למנוע מצב ששני משתמשים שולפים את אותו פתק במקביל
+    const next = await db.query(
       `
-      INSERT INTO notes (type, author_name, content, anonymous, opened)
-      VALUES ($1, $2, $3, $4, false)
-      RETURNING id
-      `,
-      [type, authorName || null, content, !!anonymous]
+      SELECT id, type, author_name AS "authorName", content, anonymous, opened
+      FROM notes
+      WHERE opened = false
+      ORDER BY id ASC
+      LIMIT 1
+      FOR UPDATE SKIP LOCKED
+      `
     );
 
-    res.status(201).json({ id: result.rows[0].id });
+    if (next.rows.length === 0) {
+      return res.status(404).json({ message: "No unopened notes left" });
+    }
+
+    const note = next.rows[0];
+
+    await db.query(`UPDATE notes SET opened = true WHERE id = $1`, [note.id]);
+
+    res.json({ ...note, opened: true });
   } catch (err) {
     console.error(err);
-    res.status(500).json({ error: "DB insert failed" });
+    res.status(500).json({ error: "DB next note failed" });
   }
 });
 
 /**
  * POST /notes/reset
- * מאפס את כל הפתקים ל-opened=0 (כלומר "סגורים" שוב)
+ * מאפס את כל הפתקים ל-opened=false
  */
-app.post("/notes/reset", (req, res) => {
-  db.prepare("UPDATE notes SET opened = 0").run();
-  res.json({ message: "All notes reset to unopened" });
+app.post("/notes/reset", async (req, res) => {
+  try {
+    await db.query(`UPDATE notes SET opened = false`);
+    res.json({ message: "All notes reset to unopened" });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "DB reset failed" });
+  }
 });
 
 /**
  * POST /notes/clear
- * מוחק את כל הפתקים מהטבלה
+ * מוחק את כל הפתקים
  */
-app.post("/notes/clear", (req, res) => {
-  db.prepare("DELETE FROM notes").run();
-  res.json({ message: "All notes cleared" });
+app.post("/notes/clear", async (req, res) => {
+  try {
+    await db.query(`DELETE FROM notes`);
+    res.json({ message: "All notes cleared" });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "DB clear failed" });
+  }
 });
-
-// מפעיל את השרת ומאזין לפורט 3000
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Server running on ${PORT}`));
