@@ -33,3 +33,17 @@ client/.env*
 
 # Vite build
 client/dist
+
+# OS junk
+.DS_Store
+
+# Node
+node_modules/
+server/node_modules/
+
+# Database
+server/retro.db
+
+# Mistyped env
+client/env.
+

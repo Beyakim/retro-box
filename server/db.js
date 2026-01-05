@@ -1,9 +1,10 @@
+const path = require("path");
 const Database = require("better-sqlite3");
 
-// יוצר/פותח קובץ DB בשם retro.db
-const db = new Database("retro.db");
+// תמיד ייצור/יפתח את ה-DB בתוך תיקיית server
+const dbPath = path.join(__dirname, "retro.db");
+const db = new Database(dbPath);
 
-// יוצר טבלת notes אם היא לא קיימת
 db.prepare(
   `
   CREATE TABLE IF NOT EXISTS notes (
