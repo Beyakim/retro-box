@@ -70,30 +70,24 @@ app.get("/notes/next", (req, res) => {
  * מוסיף פתק חדש ל-DB
  * body: { authorName, content, type, anonymous }
  */
-app.post("/notes", (req, res) => {
-  const { authorName, content, type, anonymous } = req.body;
+app.post("/notes", async (req, res) => {
+  try {
+    const { type, authorName, content, anonymous } = req.body;
 
-  const stmt = db.prepare(`
-    INSERT INTO notes (type, authorName, content, anonymous, opened)
-    VALUES (?, ?, ?, ?, ?)
-  `);
+    const result = await db.query(
+      `
+      INSERT INTO notes (type, author_name, content, anonymous, opened)
+      VALUES ($1, $2, $3, $4, false)
+      RETURNING id
+      `,
+      [type, authorName || null, content, !!anonymous]
+    );
 
-  const info = stmt.run(
-    type || null,
-    anonymous ? null : authorName || null,
-    content || null,
-    anonymous ? 1 : 0,
-    0
-  );
-
-  res.status(201).json({
-    id: info.lastInsertRowid,
-    type: type || null,
-    authorName: anonymous ? null : authorName || null,
-    content: content || null,
-    anonymous: Boolean(anonymous),
-    opened: false,
-  });
+    res.status(201).json({ id: result.rows[0].id });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "DB insert failed" });
+  }
 });
 
 /**
