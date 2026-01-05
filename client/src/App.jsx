@@ -17,10 +17,10 @@ import {
   Divider,
 } from "@mui/material";
 
-const API_BASE = import.meta.env.VITE_API_BASE ?? "http://localhost:3000";
+const API_BASE = import.meta.env.VITE_API_URL || "http://localhost:3000";
 const NOTE_TYPES = ["שיפור", "שימור", "פרגון"];
 
-// UI constants (פחות "מספרים קסומים" מפוזרים)
+// UI constants
 const CARD_MIN_HEIGHT = { xs: 640, sm: 680 };
 const BOX_SIZE = 280;
 
