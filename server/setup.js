@@ -182,4 +182,3 @@ async function setup() {
 setup()
   .then(() => process.exit(0))
   .catch(() => process.exit(1));
-EOF;
