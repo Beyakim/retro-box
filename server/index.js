@@ -652,7 +652,7 @@ app.get("/teams/:teamCode/retro/state", async (req, res) => {
     if (box.currentNoteId) {
       const noteRes = await db.query(
         `SELECT id, box_id AS "boxId", type, author_name AS "authorName",
-                content, anonymous, opened, opened_at AS "openedAt"
+                content, anonymous, opened"
          FROM public.notes
          WHERE id = $1`,
         [box.currentNoteId]
@@ -825,7 +825,6 @@ app.get("/teams/:teamCode/notes", async (req, res) => {
         content,
         anonymous,
         opened,
-        opened_at AS "openedAt",
         created_at AS "createdAt"
       FROM public.notes
       WHERE box_id = $1
@@ -849,7 +848,7 @@ const ALLOW_DEV_ADMIN = process.env.ALLOW_DEV_ADMIN === "true";
 app.post("/notes/reset", async (req, res) => {
   try {
     if (!ALLOW_DEV_ADMIN) return res.status(403).json({ error: "forbidden" });
-    await db.query(`UPDATE public.notes SET opened = false, opened_at = NULL`);
+    await db.query(`UPDATE public.notes SET opened = false`);
     return res.json({ message: "All notes reset to unopened" });
   } catch (err) {
     console.error("POST /notes/reset failed:", err);
