@@ -18,11 +18,17 @@ const app = express();
 const httpServer = createServer(app);
 const io = new Server(httpServer, {
   cors: {
-    origin: ["http://localhost:5173", "https://retro-box-five.vercel.app"],
+    origin: (origin, callback) => {
+      if (!origin) return callback(null, true);
+      if (origin.includes('.vercel.app') || origin === 'http://localhost:5173') {
+        return callback(null, true);
+      }
+      return callback(null, false);
+    },
     methods: ["GET", "POST"],
+    credentials: true,
   },
 });
-
 /* =========================================================
    CORS + JSON
    ========================================================= */
