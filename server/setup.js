@@ -1,0 +1,27 @@
+const { Pool } = require('pg');
+const fs = require('fs');
+const path = require('path');
+
+const pool = new Pool({ 
+  connectionString: process.env.DATABASE_URL,
+  ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false
+});
+
+async function setup() {
+  try {
+    console.log('🔧 Setting up database schema...');
+    
+    const schema = fs.readFileSync(path.join(__dirname, 'schema.sql'), 'utf8');
+    await pool.query(schema);
+    
+    console.log('✅ Database schema set up successfully');
+    await pool.end();
+    process.exit(0);
+  } catch (error) {
+    console.error('❌ Setup failed:', error);
+    await pool.end();
+    process.exit(1);
+  }
+}
+
+setup();

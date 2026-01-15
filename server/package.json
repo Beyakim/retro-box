@@ -3,7 +3,9 @@
   "version": "1.0.0",
   "main": "index.js",
   "scripts": {
-    "dev": "nodemon index.js"
+    "dev": "nodemon index.js",
+    "setup": "node setup.js",
+    "start": "node setup.js && node index.js"
   },
   "keywords": [],
   "author": "",
