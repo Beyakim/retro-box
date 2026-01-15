@@ -1,0 +1,677 @@
+import { useState } from "react";
+import {
+  TextField,
+  Button,
+  Box,
+  Typography,
+  Container,
+  Card,
+  CardContent,
+  FormControl,
+  InputLabel,
+  Select,
+  MenuItem,
+  Chip,
+  IconButton,
+  Snackbar,
+  Dialog,
+  DialogContent,
+  DialogTitle,
+} from "@mui/material";
+import {
+  TrendingUp,
+  Heart,
+  Lightbulb,
+  Copy,
+  Check,
+  Sparkles,
+  HelpCircle,
+  X,
+} from "lucide-react";
+
+interface CollectingNotesScreenProps {
+  teamName: string;
+  teamCode: string;
+  onSubmitNote: (note: {
+    name: string;
+    topic: string;
+    content: string;
+  }) => void;
+  onStartRetro: () => void;
+  onBack: () => void;
+  noteCount: number;
+}
+
+export function CollectingNotesScreen({
+  teamName,
+  teamCode,
+  onSubmitNote,
+  onStartRetro,
+  onBack,
+  noteCount,
+}: CollectingNotesScreenProps) {
+  const [name, setName] = useState("");
+  const [topic, setTopic] = useState("");
+  const [content, setContent] = useState("");
+  const [copied, setCopied] = useState(false);
+  const [showSuccess, setShowSuccess] = useState(false);
+  const [openHelp, setOpenHelp] = useState(false);
+
+  const handleSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (content.trim()) {
+      onSubmitNote({
+        name: name.trim() || "Anonymous",
+        topic,
+        content,
+      });
+      // Reset form
+      setContent("");
+      setTopic("");
+      // Keep name for convenience
+      setShowSuccess(true);
+    }
+  };
+
+  const handleCopyCode = async () => {
+    try {
+      await navigator.clipboard.writeText(teamCode);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch (err) {
+      console.error("Failed to copy:", err);
+      // Fallback for older browsers
+      const textArea = document.createElement("textarea");
+      textArea.value = teamCode;
+      textArea.style.position = "fixed";
+      textArea.style.left = "-999999px";
+      document.body.appendChild(textArea);
+      textArea.select();
+      try {
+        document.execCommand("copy");
+        setCopied(true);
+        setTimeout(() => setCopied(false), 2000);
+      } catch (e) {
+        console.error("Fallback copy failed:", e);
+      }
+      document.body.removeChild(textArea);
+    }
+  };
+
+  const topicOptions = [
+    {
+      value: "improve",
+      label: "Improve",
+      icon: <TrendingUp size={20} />,
+      color: "#FFC857",
+    },
+    {
+      value: "keep",
+      label: "Keep",
+      icon: <Heart size={20} />,
+      color: "#FF6B9D",
+    },
+    {
+      value: "idea",
+      label: "Idea",
+      icon: <Lightbulb size={20} />,
+      color: "#60D0E8",
+    },
+    {
+      value: "shoutout",
+      label: "Shoutout",
+      icon: <Sparkles size={20} />,
+      color: "#C060E8",
+    },
+  ];
+
+  return (
+    <Box
+      sx={{
+        minHeight: "100vh",
+        background:
+          "linear-gradient(135deg, #FFF5F8 0%, #FFF9FB 50%, #F8F9FF 100%)",
+        padding: 3,
+        paddingBottom: "140px",
+      }}
+    >
+      <Container maxWidth="lg">
+        {/* Header */}
+        <Box sx={{ mb: 4, textAlign: "center" }}>
+          <Typography
+            variant="h4"
+            sx={{
+              fontWeight: 700,
+              fontSize: { xs: "1.75rem", sm: "2.25rem" },
+              background: "linear-gradient(135deg, #FF6B9D 0%, #C060E8 100%)",
+              WebkitBackgroundClip: "text",
+              WebkitTextFillColor: "transparent",
+              mb: 2,
+            }}
+          >
+            {teamName}
+          </Typography>
+
+          {/* Team code with copy */}
+          <Box
+            sx={{
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              gap: 1,
+              mb: 2,
+            }}
+          >
+            <Typography
+              sx={{
+                color: "#64748B",
+                fontSize: "1rem",
+                fontWeight: 500,
+              }}
+            >
+              Team code:
+            </Typography>
+            <Box
+              sx={{
+                display: "inline-flex",
+                alignItems: "center",
+                gap: 1,
+                backgroundColor: "white",
+                padding: "6px 12px",
+                borderRadius: "12px",
+                border: "2px solid #E2E8F0",
+              }}
+            >
+              <Typography
+                sx={{
+                  fontFamily: "monospace",
+                  fontSize: "1.125rem",
+                  fontWeight: 700,
+                  color: "#1E293B",
+                  letterSpacing: "0.1em",
+                }}
+              >
+                {teamCode}
+              </Typography>
+              <IconButton
+                size="small"
+                onClick={handleCopyCode}
+                sx={{
+                  padding: "4px",
+                  "&:hover": {
+                    backgroundColor: "rgba(255, 107, 157, 0.1)",
+                  },
+                }}
+              >
+                {copied ? (
+                  <Check size={16} color="#10B981" />
+                ) : (
+                  <Copy size={16} color="#64748B" />
+                )}
+              </IconButton>
+            </Box>
+          </Box>
+
+          {/* Status */}
+          <Box
+            sx={{
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              gap: 2,
+            }}
+          >
+            <Chip
+              label="Collecting notes"
+              sx={{
+                backgroundColor: "#D1FAE5",
+                color: "#065F46",
+                fontWeight: 600,
+                fontSize: "0.875rem",
+                borderRadius: "10px",
+                padding: "4px 8px",
+                height: "auto",
+              }}
+            />
+            {noteCount > 0 && (
+              <Typography sx={{ color: "#64748B", fontSize: "0.875rem" }}>
+                {noteCount} {noteCount === 1 ? "note" : "notes"} in the box
+              </Typography>
+            )}
+          </Box>
+
+          {/* How it works link */}
+          <Box sx={{ textAlign: "center", mt: 2 }}>
+            <Button
+              variant="text"
+              size="small"
+              startIcon={<HelpCircle size={16} />}
+              onClick={() => setOpenHelp(true)}
+              sx={{
+                textTransform: "none",
+                color: "#64748B",
+                fontSize: "0.875rem",
+                "&:hover": {
+                  backgroundColor: "rgba(192, 96, 232, 0.08)",
+                  color: "#C060E8",
+                },
+              }}
+            >
+              How it works
+            </Button>
+          </Box>
+        </Box>
+
+        {/* Note Form - Center of gravity */}
+        <Box sx={{ display: "flex", justifyContent: "center", mb: 6 }}>
+          <Card
+            sx={{
+              borderRadius: "24px",
+              boxShadow: "0 8px 32px rgba(0, 0, 0, 0.08)",
+              border: "1px solid rgba(255, 107, 157, 0.1)",
+              maxWidth: "600px",
+              width: "100%",
+            }}
+          >
+            <CardContent sx={{ padding: { xs: 3, sm: 4 } }}>
+              <Box
+                component="form"
+                onSubmit={handleSubmit}
+                sx={{
+                  display: "flex",
+                  flexDirection: "column",
+                  gap: 3,
+                }}
+              >
+                <Typography
+                  variant="h6"
+                  sx={{
+                    fontWeight: 600,
+                    color: "#1E293B",
+                    fontSize: "1.25rem",
+                  }}
+                >
+                  Add a note
+                </Typography>
+
+                {/* Name field - optional */}
+                <TextField
+                  fullWidth
+                  label="Your name (optional)"
+                  variant="outlined"
+                  value={name}
+                  onChange={(e) => setName(e.target.value)}
+                  placeholder="Leave blank to stay anonymous"
+                  sx={{
+                    "& .MuiOutlinedInput-root": {
+                      borderRadius: "14px",
+                      backgroundColor: "#FAFAFA",
+                      "& fieldset": {
+                        borderColor: "#E2E8F0",
+                      },
+                      "&:hover fieldset": {
+                        borderColor: "#CBD5E1",
+                      },
+                      "&.Mui-focused fieldset": {
+                        borderColor: "#FF6B9D",
+                      },
+                    },
+                    "& .MuiInputLabel-root.Mui-focused": {
+                      color: "#FF6B9D",
+                    },
+                  }}
+                />
+
+                {/* Topic selector with icons */}
+                <Box>
+                  <Typography
+                    sx={{
+                      fontSize: "0.875rem",
+                      fontWeight: 600,
+                      color: "#475569",
+                      mb: 1.5,
+                    }}
+                  >
+                    Topic
+                  </Typography>
+                  <Box sx={{ display: "flex", gap: 1.5, flexWrap: "wrap" }}>
+                    {topicOptions.map((option) => (
+                      <Button
+                        key={option.value}
+                        variant={
+                          topic === option.value ? "contained" : "outlined"
+                        }
+                        onClick={() => setTopic(option.value)}
+                        startIcon={option.icon}
+                        sx={{
+                          flex: { xs: "1 1 calc(50% - 6px)", sm: "1" },
+                          borderRadius: "14px",
+                          textTransform: "none",
+                          fontSize: "0.9375rem",
+                          fontWeight: 600,
+                          padding: "12px 20px",
+                          borderWidth: "2px",
+                          borderColor:
+                            topic === option.value ? option.color : "#E2E8F0",
+                          backgroundColor:
+                            topic === option.value
+                              ? option.color
+                              : "transparent",
+                          color: topic === option.value ? "white" : "#64748B",
+                          "&:hover": {
+                            borderWidth: "2px",
+                            borderColor: option.color,
+                            backgroundColor:
+                              topic === option.value
+                                ? option.color
+                                : `${option.color}15`,
+                          },
+                          "& .MuiButton-startIcon": {
+                            marginRight: "8px",
+                          },
+                        }}
+                      >
+                        {option.label}
+                      </Button>
+                    ))}
+                  </Box>
+                </Box>
+
+                {/* Content textarea */}
+                <TextField
+                  fullWidth
+                  multiline
+                  rows={5}
+                  label="Your note"
+                  variant="outlined"
+                  value={content}
+                  onChange={(e) => setContent(e.target.value)}
+                  required
+                  placeholder="What's on your mind?"
+                  sx={{
+                    "& .MuiOutlinedInput-root": {
+                      borderRadius: "14px",
+                      backgroundColor: "#FAFAFA",
+                      "& fieldset": {
+                        borderColor: "#E2E8F0",
+                      },
+                      "&:hover fieldset": {
+                        borderColor: "#CBD5E1",
+                      },
+                      "&.Mui-focused fieldset": {
+                        borderColor: "#FF6B9D",
+                      },
+                    },
+                    "& .MuiInputLabel-root.Mui-focused": {
+                      color: "#FF6B9D",
+                    },
+                  }}
+                />
+
+                {/* Submit button */}
+                <Button
+                  type="submit"
+                  variant="contained"
+                  size="large"
+                  fullWidth
+                  sx={{
+                    borderRadius: "14px",
+                    textTransform: "none",
+                    fontSize: "1.0625rem",
+                    fontWeight: 600,
+                    padding: "14px",
+                    background:
+                      "linear-gradient(135deg, #FF6B9D 0%, #FE8DB5 100%)",
+                    boxShadow: "0 4px 14px rgba(255, 107, 157, 0.35)",
+                    marginTop: 1,
+                    "&:hover": {
+                      background:
+                        "linear-gradient(135deg, #FF5A8C 0%, #FD7CA4 100%)",
+                      boxShadow: "0 6px 20px rgba(255, 107, 157, 0.45)",
+                      transform: "translateY(-1px)",
+                    },
+                    transition: "all 0.2s ease",
+                  }}
+                >
+                  Put it in the box
+                </Button>
+              </Box>
+            </CardContent>
+          </Card>
+        </Box>
+
+        {/* Back button */}
+        <Box sx={{ textAlign: "center", mt: 4 }}>
+          <Button
+            variant="text"
+            onClick={onBack}
+            sx={{
+              textTransform: "none",
+              color: "#64748B",
+              fontSize: "0.9375rem",
+              "&:hover": {
+                backgroundColor: "rgba(255, 107, 157, 0.08)",
+                color: "#FF6B9D",
+              },
+            }}
+          >
+            ← Leave this team
+          </Button>
+        </Box>
+      </Container>
+
+      {/* Bottom Next-Step Action - Visually Separated */}
+      <Box
+        sx={{
+          position: "fixed",
+          bottom: 0,
+          left: 0,
+          right: 0,
+          backgroundColor: "white",
+          borderTop: "1px solid #E2E8F0",
+          padding: "20px 24px",
+          boxShadow: "0 -4px 16px rgba(0, 0, 0, 0.04)",
+        }}
+      >
+        <Container maxWidth="sm">
+          <Box
+            sx={{
+              display: "flex",
+              flexDirection: "column",
+              alignItems: "center",
+              gap: 1,
+            }}
+          >
+            <Button
+              variant="contained"
+              size="large"
+              onClick={onStartRetro}
+              disabled={noteCount === 0}
+              sx={{
+                borderRadius: "14px",
+                textTransform: "none",
+                fontSize: "1rem",
+                fontWeight: 600,
+                padding: "12px 32px",
+                background:
+                  noteCount === 0
+                    ? "#E2E8F0"
+                    : "linear-gradient(135deg, #C060E8 0%, #A855F7 100%)",
+                color: noteCount === 0 ? "#94A3B8" : "white",
+                boxShadow:
+                  noteCount === 0
+                    ? "none"
+                    : "0 2px 12px rgba(192, 96, 232, 0.25)",
+                "&:hover": {
+                  background:
+                    noteCount === 0
+                      ? "#E2E8F0"
+                      : "linear-gradient(135deg, #B050D8 0%, #9845E7 100%)",
+                  boxShadow:
+                    noteCount === 0
+                      ? "none"
+                      : "0 4px 16px rgba(192, 96, 232, 0.35)",
+                },
+                "&:disabled": {
+                  background: "#E2E8F0",
+                  color: "#94A3B8",
+                },
+                transition: "all 0.2s ease",
+              }}
+            >
+              {noteCount === 0 ? "Add notes to start" : "Start the retro"}
+            </Button>
+            <Typography
+              sx={{
+                textAlign: "center",
+                fontSize: "0.8125rem",
+                color: "#94A3B8",
+              }}
+            >
+              This will stop note collection and open the box.
+            </Typography>
+          </Box>
+        </Container>
+      </Box>
+
+      {/* Success snackbar */}
+      <Snackbar
+        open={showSuccess}
+        autoHideDuration={2000}
+        onClose={() => setShowSuccess(false)}
+        message="Note added to the box"
+        anchorOrigin={{ vertical: "bottom", horizontal: "center" }}
+      />
+
+      {/* Help dialog */}
+      <Dialog
+        open={openHelp}
+        onClose={() => setOpenHelp(false)}
+        fullWidth
+        maxWidth="sm"
+        PaperProps={{
+          sx: {
+            borderRadius: "24px",
+          },
+        }}
+      >
+        <DialogTitle
+          sx={{
+            fontWeight: 600,
+            fontSize: "1.25rem",
+            color: "#1E293B",
+            pb: 2,
+          }}
+        >
+          How it works
+        </DialogTitle>
+        <DialogContent>
+          <Box sx={{ display: "flex", flexDirection: "column", gap: 2.5 }}>
+            <Box sx={{ display: "flex", gap: 2 }}>
+              <Box
+                sx={{
+                  minWidth: "32px",
+                  height: "32px",
+                  borderRadius: "50%",
+                  background:
+                    "linear-gradient(135deg, #FF6B9D 0%, #FE8DB5 100%)",
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  color: "white",
+                  fontWeight: 700,
+                  fontSize: "0.875rem",
+                  flexShrink: 0,
+                }}
+              >
+                1
+              </Box>
+              <Box>
+                <Typography sx={{ fontWeight: 600, color: "#1E293B", mb: 0.5 }}>
+                  Share the team code
+                </Typography>
+                <Typography
+                  sx={{
+                    fontSize: "0.9375rem",
+                    color: "#64748B",
+                    lineHeight: 1.5,
+                  }}
+                >
+                  Invite your team to join using the code above
+                </Typography>
+              </Box>
+            </Box>
+            <Box sx={{ display: "flex", gap: 2 }}>
+              <Box
+                sx={{
+                  minWidth: "32px",
+                  height: "32px",
+                  borderRadius: "50%",
+                  background:
+                    "linear-gradient(135deg, #FFC857 0%, #FFD666 100%)",
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  color: "#664D03",
+                  fontWeight: 700,
+                  fontSize: "0.875rem",
+                  flexShrink: 0,
+                }}
+              >
+                2
+              </Box>
+              <Box>
+                <Typography sx={{ fontWeight: 600, color: "#1E293B", mb: 0.5 }}>
+                  Collect honest thoughts
+                </Typography>
+                <Typography
+                  sx={{
+                    fontSize: "0.9375rem",
+                    color: "#64748B",
+                    lineHeight: 1.5,
+                  }}
+                >
+                  Everyone adds their notes anonymously or with their name
+                </Typography>
+              </Box>
+            </Box>
+            <Box sx={{ display: "flex", gap: 2 }}>
+              <Box
+                sx={{
+                  minWidth: "32px",
+                  height: "32px",
+                  borderRadius: "50%",
+                  background:
+                    "linear-gradient(135deg, #C060E8 0%, #A855F7 100%)",
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  color: "white",
+                  fontWeight: 700,
+                  fontSize: "0.875rem",
+                  flexShrink: 0,
+                }}
+              >
+                3
+              </Box>
+              <Box>
+                <Typography sx={{ fontWeight: 600, color: "#1E293B", mb: 0.5 }}>
+                  Open the box together
+                </Typography>
+                <Typography
+                  sx={{
+                    fontSize: "0.9375rem",
+                    color: "#64748B",
+                    lineHeight: 1.5,
+                  }}
+                >
+                  Review notes one by one and have meaningful discussions
+                </Typography>
+              </Box>
+            </Box>
+          </Box>
+        </DialogContent>
+      </Dialog>
+    </Box>
+  );
+}
