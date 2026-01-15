@@ -20,7 +20,10 @@ const io = new Server(httpServer, {
   cors: {
     origin: (origin, callback) => {
       if (!origin) return callback(null, true);
-      if (origin.includes('.vercel.app') || origin === 'http://localhost:5173') {
+      if (
+        origin.includes(".vercel.app") ||
+        origin === "http://localhost:5173"
+      ) {
         return callback(null, true);
       }
       return callback(null, false);
@@ -43,12 +46,11 @@ app.use(
       if (!origin) return callback(null, true);
       if (ALLOWED_ORIGINS.has(origin)) return callback(null, true);
       // Allow all Vercel deployments
-      if (origin && origin.includes('.vercel.app')) return callback(null, true);
+      if (origin && origin.includes(".vercel.app")) return callback(null, true);
       return callback(new Error("CORS: origin not allowed"));
     },
   })
 );
-
 
 app.use(express.json({ limit: "256kb" }));
 
@@ -548,17 +550,16 @@ app.post("/teams/:teamCode/retro/pull-next", async (req, res) => {
 
     const updated = await client.query(
       `UPDATE public.notes
-       SET opened = true, opened_at = NOW()
-       WHERE id = $1
-       RETURNING
-         id,
-         box_id AS "boxId",
-         type,
-         author_name AS "authorName",
-         content,
-         anonymous,
-         opened,
-         opened_at AS "openedAt"`,
+   SET opened = true
+   WHERE id = $1
+   RETURNING
+     id,
+     box_id AS "boxId",
+     type,
+     author_name AS "authorName",
+     content,
+     anonymous,
+     opened`,
       [noteId]
     );
 
