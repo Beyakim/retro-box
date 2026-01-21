@@ -181,7 +181,6 @@ type: string ('keep', 'improve', 'idea', 'shoutout')
 author_name: string (nullable for anonymous)
 content: text
 opened: boolean (false until discussed)
-opened_at: timestamp (nullable)
 created_at: timestamp
 ```
 
