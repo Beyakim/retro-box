@@ -26,3 +26,7 @@ client/dist
 # DB
 *.db
 
+# Uploads (multer local storage)
+server/uploads
+
+
