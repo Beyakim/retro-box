@@ -15,12 +15,12 @@ async function addColumnIfNotExists(client, table, column, definition) {
     FROM information_schema.columns 
     WHERE table_name = $1 AND column_name = $2
   `,
-    [table, column]
+    [table, column],
   );
 
   if (check.rows.length === 0) {
     await client.query(
-      `ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`
+      `ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`,
     );
     console.log(`  ✅ Added column ${table}.${column}`);
     return true;
@@ -37,7 +37,6 @@ async function setup() {
     console.log("🔧 Starting database schema reconciliation...");
     console.log("");
 
-    // BEGIN TRANSACTION
     await client.query("BEGIN");
     console.log("📦 Transaction started");
     console.log("");
@@ -55,7 +54,7 @@ async function setup() {
     console.log("  ✅ Table exists");
     console.log("");
 
-    // ========== BOXES TABLE (RETRO SESSION TABLE) ==========
+    // ========== BOXES TABLE ==========
     console.log("📋 Boxes table (retro sessions):");
     await client.query(`
       CREATE TABLE IF NOT EXISTS boxes (
@@ -66,35 +65,33 @@ async function setup() {
     `);
     console.log("  ✅ Table exists");
 
-    // Add all required columns for retro sessions
     await addColumnIfNotExists(client, "boxes", "closed_at", "TIMESTAMP");
     await addColumnIfNotExists(
       client,
       "boxes",
       "status",
-      "VARCHAR(20) DEFAULT 'collecting'"
+      "VARCHAR(20) DEFAULT 'collecting'",
     );
     await addColumnIfNotExists(
       client,
       "boxes",
       "retro_number",
-      "INTEGER DEFAULT 1"
+      "INTEGER DEFAULT 1",
     );
     await addColumnIfNotExists(
       client,
       "boxes",
       "host_client_id",
-      "VARCHAR(100)"
+      "VARCHAR(100)",
     );
     await addColumnIfNotExists(client, "boxes", "current_note_id", "INTEGER");
 
-    // Backfill status to 'collecting' (backend expects this)
     const backfillBoxStatus = await client.query(`
       UPDATE boxes SET status = 'collecting' WHERE status IS NULL OR status = 'open'
     `);
     if (backfillBoxStatus.rowCount > 0) {
       console.log(
-        `  🔄 Backfilled status to 'collecting' for ${backfillBoxStatus.rowCount} boxes`
+        `  🔄 Backfilled status to 'collecting' for ${backfillBoxStatus.rowCount} boxes`,
       );
     }
     console.log("");
@@ -117,22 +114,24 @@ async function setup() {
       client,
       "notes",
       "anonymous",
-      "BOOLEAN DEFAULT false"
+      "BOOLEAN DEFAULT false",
     );
     await addColumnIfNotExists(
       client,
       "notes",
       "opened",
-      "BOOLEAN NOT NULL DEFAULT false"
+      "BOOLEAN NOT NULL DEFAULT false",
     );
 
-    // ALWAYS backfill opened to ensure NOT NULL constraint
+    // ✅ זה החסר שיפתור את התמונות בפרוד
+    await addColumnIfNotExists(client, "notes", "image_url", "TEXT");
+
     const backfillOpened = await client.query(`
       UPDATE notes SET opened = false WHERE opened IS NULL
     `);
     if (backfillOpened.rowCount > 0) {
       console.log(
-        `  🔄 Backfilled opened for ${backfillOpened.rowCount} notes`
+        `  🔄 Backfilled opened for ${backfillOpened.rowCount} notes`,
       );
     }
     console.log("");
@@ -151,7 +150,7 @@ async function setup() {
       console.log(
         `     - ${r.column_name} (${r.data_type})${
           r.column_default ? " = " + r.column_default : ""
-        }`
+        }`,
       );
     });
 
@@ -161,12 +160,11 @@ async function setup() {
     `);
     console.log(
       "  📊 notes:",
-      notesSchema.rows.map((r) => r.column_name).join(", ")
+      notesSchema.rows.map((r) => r.column_name).join(", "),
     );
 
     console.log("");
 
-    // COMMIT TRANSACTION
     await client.query("COMMIT");
     console.log("✅ Transaction committed - schema reconciliation complete");
   } catch (error) {
