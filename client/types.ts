@@ -1,16 +1,12 @@
-export interface Note {
-  id: string;
-  name: string;
-  topic: string;
-  content: string;
-}
+export type Topic = "improve" | "keep" | "idea" | "shoutout";
 
 export interface BackendNote {
   id: number;
   boxId: number;
-  type: string;
+  type: Topic; // ✅ לא string
   authorName: string | null;
-  content: string;
+  content: string | null; // חשוב! כי בשרת זה יכול להיות null
+  imageUrl?: string | null; // הוספנו תמיכה רשמית בתמונה
   anonymous: boolean;
   opened: boolean;
   openedAt: string | null;

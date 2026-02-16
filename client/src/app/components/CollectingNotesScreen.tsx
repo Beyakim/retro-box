@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   TextField,
   Button,
@@ -13,6 +13,8 @@ import {
   Dialog,
   DialogContent,
   DialogTitle,
+  Stack,
+  Avatar,
 } from "@mui/material";
 
 import {
@@ -58,6 +60,11 @@ export function CollectingNotesScreen({
   const [showSuccess, setShowSuccess] = useState(false);
   const [openHelp, setOpenHelp] = useState(false);
 
+  const [imageFile, setImageFile] = useState<File | null>(null);
+  const [imagePreview, setImagePreview] = useState<string | null>(null);
+  const [isUploading, setIsUploading] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+
   // Team name editing state
   const [isEditingName, setIsEditingName] = useState(false);
   const [editedName, setEditedName] = useState(teamName);
@@ -66,8 +73,78 @@ export function CollectingNotesScreen({
 
   const displayName = teamName || `Team ${teamCode}`;
 
-  const handleSubmit = (e: React.FormEvent) => {
+  // ניקוי preview כדי לא לדלוף זיכרון
+  useEffect(() => {
+    return () => {
+      if (imagePreview) URL.revokeObjectURL(imagePreview);
+    };
+  }, [imagePreview]);
+
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+
+    if (!topic) return;
+
+    // ✅ תמונה: upload -> create note עם imageUrl
+    if (imageFile) {
+      try {
+        setIsUploading(true);
+
+        const form = new FormData();
+        form.append("file", imageFile); // תואם לשרת: upload.single("file")
+
+        const uploadRes = await fetch(`${API_BASE}/upload`, {
+          method: "POST",
+          body: form, // חשוב: בלי headers
+        });
+
+        if (!uploadRes.ok) {
+          console.error("Upload failed:", await uploadRes.text());
+          alert("Upload failed");
+          return;
+        }
+
+        const { imageUrl } = await uploadRes.json(); // { imageUrl: "/uploads/xxx.jpeg" }
+
+        const noteRes = await fetch(`${API_BASE}/teams/${teamCode}/notes`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            type: topic,
+            authorName: name.trim() || "Anonymous",
+            content: content.trim(), // ✅ חדש
+            imageUrl,
+            anonymous: !name.trim() || name.trim() === "Anonymous",
+          }),
+        });
+
+        if (!noteRes.ok) {
+          console.error("Note create failed:", await noteRes.text());
+          alert("Failed to add note");
+          return;
+        }
+
+        // ניקוי
+        setImageFile(null);
+        if (imagePreview) URL.revokeObjectURL(imagePreview);
+        setImagePreview(null);
+        setContent("");
+        setTopic("");
+        setShowSuccess(true);
+
+        // מאפשר לבחור שוב אותו קובץ
+        if (fileInputRef.current) fileInputRef.current.value = "";
+        return;
+      } catch (err) {
+        console.error(err);
+        alert("Upload failed");
+        return;
+      } finally {
+        setIsUploading(false);
+      }
+    }
+
+    // ✅ טקסט רגיל
     if (content.trim()) {
       onSubmitNote({
         name: name.trim() || "Anonymous",
@@ -312,7 +389,6 @@ export function CollectingNotesScreen({
             {noteCount} {noteCount === 1 ? "note" : "notes"} collected
           </Typography>
 
-          {/* RESTORED: How it works button */}
           <Box sx={{ textAlign: "center", mt: 2 }}>
             <Button
               variant="text"
@@ -353,7 +429,6 @@ export function CollectingNotesScreen({
                   fullWidth
                 />
 
-                {/* RESTORED: Chip-based topic selector */}
                 <Box>
                   <Typography
                     sx={{
@@ -415,15 +490,100 @@ export function CollectingNotesScreen({
                   placeholder="What's on your mind?"
                   multiline
                   rows={4}
-                  required
+                  required={!imageFile} // ✅ אם יש תמונה, טקסט לא חובה
                   fullWidth
                 />
+
+                <Box>
+                  <Typography
+                    sx={{
+                      fontSize: "0.875rem",
+                      fontWeight: 600,
+                      color: "#475569",
+                      mb: 1,
+                    }}
+                  >
+                    Image (optional)
+                  </Typography>
+
+                  <Stack
+                    direction="row"
+                    spacing={1.5}
+                    alignItems="center"
+                    flexWrap="wrap"
+                  >
+                    <Button
+                      variant="outlined"
+                      component="label"
+                      sx={{ textTransform: "none", borderRadius: "12px" }}
+                      disabled={isUploading}
+                    >
+                      Upload image
+                      <input
+                        ref={fileInputRef}
+                        hidden
+                        type="file"
+                        accept="image/*"
+                        onChange={(e) => {
+                          const file = e.target.files?.[0] ?? null;
+
+                          if (imagePreview) URL.revokeObjectURL(imagePreview);
+
+                          setImageFile(file);
+
+                          if (file) {
+                            const url = URL.createObjectURL(file);
+                            setImagePreview(url);
+                          } else {
+                            setImagePreview(null);
+                          }
+                        }}
+                      />
+                    </Button>
+
+                    {imageFile && (
+                      <>
+                        <Typography variant="body2" sx={{ color: "#64748B" }}>
+                          {imageFile.name}
+                        </Typography>
+
+                        <Button
+                          variant="text"
+                          onClick={() => {
+                            setImageFile(null);
+                            if (imagePreview) URL.revokeObjectURL(imagePreview);
+                            setImagePreview(null);
+                            if (fileInputRef.current)
+                              fileInputRef.current.value = "";
+                          }}
+                          sx={{ textTransform: "none" }}
+                          disabled={isUploading}
+                        >
+                          Remove
+                        </Button>
+                      </>
+                    )}
+                  </Stack>
+
+                  {imagePreview && (
+                    <Box sx={{ mt: 1.5 }}>
+                      <Avatar
+                        variant="rounded"
+                        src={imagePreview}
+                        alt="preview"
+                        sx={{ width: 140, height: 140, borderRadius: "16px" }}
+                      />
+                    </Box>
+                  )}
+                </Box>
 
                 <Button
                   type="submit"
                   variant="contained"
                   size="large"
-                  disabled={!content.trim() || !topic}
+                  disabled={
+                    (!content.trim() && !imageFile) || !topic || isUploading
+                  }
                   sx={{
                     borderRadius: "12px",
                     textTransform: "none",
@@ -438,7 +598,7 @@ export function CollectingNotesScreen({
                     "&:disabled": { background: "#E2E8F0", color: "#94A3B8" },
                   }}
                 >
-                  Add Note
+                  {isUploading ? "Uploading..." : "Add Note"}
                 </Button>
               </Box>
             </form>
@@ -498,17 +658,13 @@ export function CollectingNotesScreen({
           message="Note added!"
         />
 
-        {/* RESTORED: How it works dialog */}
+        {/* How it works dialog */}
         <Dialog
           open={openHelp}
           onClose={() => setOpenHelp(false)}
           fullWidth
           maxWidth="sm"
-          PaperProps={{
-            sx: {
-              borderRadius: "24px",
-            },
-          }}
+          PaperProps={{ sx: { borderRadius: "24px" } }}
         >
           <DialogTitle
             sx={{
@@ -558,6 +714,7 @@ export function CollectingNotesScreen({
                   </Typography>
                 </Box>
               </Box>
+
               <Box sx={{ display: "flex", gap: 2 }}>
                 <Box
                   sx={{
@@ -594,6 +751,7 @@ export function CollectingNotesScreen({
                   </Typography>
                 </Box>
               </Box>
+
               <Box sx={{ display: "flex", gap: 2 }}>
                 <Box
                   sx={{

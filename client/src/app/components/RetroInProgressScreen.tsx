@@ -1,3 +1,5 @@
+import React from "react";
+
 import {
   Button,
   Box,
@@ -7,23 +9,19 @@ import {
   CardContent,
   Chip,
 } from "@mui/material";
+
 import { GiftBox } from "@/app/components/GiftBox";
 import { motion, AnimatePresence } from "motion/react";
 import { TrendingUp, Heart, Lightbulb, Sparkles } from "lucide-react";
 
-const API_BASE = import.meta.env.VITE_API_BASE ?? "http://localhost:3000";
+import type { BackendNote, Topic } from "types";
 
-interface Note {
-  id: string;
-  name: string;
-  topic: string;
-  content: string;
-}
+const API_BASE = import.meta.env.VITE_API_BASE ?? "http://localhost:3000";
 
 interface RetroInProgressScreenProps {
   teamName: string;
   teamCode: string;
-  currentNote: Note | null;
+  currentNote: BackendNote | null; // ✅ תואם למה שמגיע מהשרת
   remainingCount: number;
   isHost: boolean;
   clientId: string;
@@ -39,7 +37,10 @@ export function RetroInProgressScreen({
   clientId,
   onBack,
 }: RetroInProgressScreenProps) {
-  const topicConfig = {
+  const topicConfig: Record<
+    Topic,
+    { label: string; icon: React.ReactElement; bg: string; text: string }
+  > = {
     improve: {
       label: "Improve",
       icon: <TrendingUp size={16} />,
@@ -69,10 +70,7 @@ export function RetroInProgressScreen({
   const allNotesRevealed = remainingCount === 0;
 
   const handlePullNote = async () => {
-    if (!isHost) {
-      console.log("Only host can pull notes");
-      return;
-    }
+    if (!isHost) return;
 
     try {
       const res = await fetch(`${API_BASE}/teams/${teamCode}/retro/pull-next`, {
@@ -85,17 +83,36 @@ export function RetroInProgressScreen({
       });
 
       if (!res.ok) {
-        const error = await res.json();
+        const error = await res.json().catch(() => ({}));
         console.error("Failed to pull note:", error);
         return;
       }
 
-      // Note will be updated via socket event
       console.log("Note pulled, waiting for socket update...");
     } catch (error) {
       console.error("Failed to pull note:", error);
     }
   };
+
+  // ---------- Derived UI fields ----------
+  const imageUrl = (currentNote?.imageUrl ?? "").trim();
+  const text = (currentNote?.content ?? "").trim();
+
+  const hasImage =
+    imageUrl.startsWith("/uploads/") ||
+    imageUrl.startsWith("http://") ||
+    imageUrl.startsWith("https://");
+
+  const hasText = text.length > 0;
+
+  const imageSrc = hasImage
+    ? imageUrl.startsWith("/uploads/")
+      ? `${API_BASE}${imageUrl}`
+      : imageUrl
+    : "";
+
+  const authorLabel =
+    (currentNote?.authorName && currentNote.authorName.trim()) || "Anonymous";
 
   return (
     <Box
@@ -122,6 +139,7 @@ export function RetroInProgressScreen({
           >
             {teamName}
           </Typography>
+
           <Chip
             label={
               allNotesRevealed
@@ -140,6 +158,7 @@ export function RetroInProgressScreen({
               height: "auto",
             }}
           />
+
           {isHost && (
             <Typography
               variant="caption"
@@ -197,74 +216,77 @@ export function RetroInProgressScreen({
                     }}
                   >
                     <CardContent sx={{ padding: { xs: 3, sm: 5 } }}>
-                      {currentNote.topic &&
-                        topicConfig[
-                          currentNote.topic as keyof typeof topicConfig
-                        ] && (
-                          <Box sx={{ mb: 3 }}>
-                            <Chip
-                              icon={
-                                topicConfig[
-                                  currentNote.topic as keyof typeof topicConfig
-                                ].icon
-                              }
-                              label={
-                                topicConfig[
-                                  currentNote.topic as keyof typeof topicConfig
-                                ].label
-                              }
-                              sx={{
-                                backgroundColor:
-                                  topicConfig[
-                                    currentNote.topic as keyof typeof topicConfig
-                                  ].bg,
-                                color:
-                                  topicConfig[
-                                    currentNote.topic as keyof typeof topicConfig
-                                  ].text,
-                                fontWeight: 600,
-                                fontSize: "0.875rem",
-                                borderRadius: "10px",
-                                padding: "6px 4px",
-                                height: "auto",
-                                "& .MuiChip-icon": {
-                                  color:
-                                    topicConfig[
-                                      currentNote.topic as keyof typeof topicConfig
-                                    ].text,
-                                  marginLeft: "8px",
-                                },
-                              }}
-                            />
-                          </Box>
-                        )}
+                      {/* Topic chip */}
+                      <Box sx={{ mb: 3 }}>
+                        <Chip
+                          icon={topicConfig[currentNote.type].icon}
+                          label={topicConfig[currentNote.type].label}
+                          sx={{
+                            backgroundColor: topicConfig[currentNote.type].bg,
+                            color: topicConfig[currentNote.type].text,
+                            fontWeight: 600,
+                            fontSize: "0.875rem",
+                            borderRadius: "10px",
+                            padding: "6px 4px",
+                            height: "auto",
+                            "& .MuiChip-icon": {
+                              color: topicConfig[currentNote.type].text,
+                              marginLeft: "8px",
+                            },
+                          }}
+                        />
+                      </Box>
 
-                      <Typography
-                        sx={{
-                          color: "#1E293B",
-                          fontWeight: 400,
-                          lineHeight: 1.7,
-                          fontSize: { xs: "1.125rem", sm: "1.25rem" },
-                          mb: 4,
-                          whiteSpace: "pre-wrap",
-                        }}
-                      >
-                        {currentNote.content}
-                      </Typography>
+                      {/* Text (if exists) */}
+                      {hasText && (
+                        <Typography
+                          sx={{
+                            color: "#1E293B",
+                            fontWeight: 400,
+                            lineHeight: 1.7,
+                            fontSize: { xs: "1.125rem", sm: "1.25rem" },
+                            mb: hasImage ? 2 : 4,
+                            whiteSpace: "pre-wrap",
+                          }}
+                        >
+                          {text}
+                        </Typography>
+                      )}
 
+                      {/* Image (if exists) */}
+                      {hasImage && (
+                        <Box
+                          component="img"
+                          src={imageSrc}
+                          alt="note image"
+                          onError={() => {
+                            console.error("IMAGE FAILED TO LOAD:", imageSrc);
+                          }}
+                          sx={{
+                            width: "100%",
+                            maxHeight: "420px",
+                            objectFit: "contain",
+                            borderRadius: "18px",
+                            mb: 4,
+                            border: "1px solid rgba(148, 163, 184, 0.35)",
+                            boxShadow: "0 10px 28px rgba(0,0,0,0.10)",
+                            backgroundColor: "rgba(255,255,255,0.6)",
+                          }}
+                        />
+                      )}
+
+                      {/* Author */}
                       <Typography
                         variant="body2"
                         sx={{
                           color: "#64748B",
                           fontSize: "0.9375rem",
                           fontStyle:
-                            currentNote.name === "Anonymous"
-                              ? "italic"
-                              : "normal",
+                            authorLabel === "Anonymous" ? "italic" : "normal",
                           fontWeight: 500,
                         }}
                       >
-                        — {currentNote.name}
+                        — {authorLabel}
                       </Typography>
                     </CardContent>
                   </Card>
@@ -276,7 +298,6 @@ export function RetroInProgressScreen({
               <GiftBox isOpen={false} animate={!currentNote} />
             </Box>
 
-            {/* Open/Pull note button - only for host when no current note */}
             {!currentNote && !allNotesRevealed && isHost && (
               <Button
                 variant="contained"
@@ -304,7 +325,6 @@ export function RetroInProgressScreen({
               </Button>
             )}
 
-            {/* Waiting message for non-host */}
             {!currentNote && !allNotesRevealed && !isHost && (
               <Typography
                 sx={{
@@ -317,7 +337,6 @@ export function RetroInProgressScreen({
               </Typography>
             )}
 
-            {/* Next note button - only for host when there's a current note and notes remain */}
             {currentNote && !allNotesRevealed && isHost && (
               <Button
                 variant="contained"
@@ -345,7 +364,6 @@ export function RetroInProgressScreen({
               </Button>
             )}
 
-            {/* Celebrate message when all notes revealed */}
             {allNotesRevealed && (
               <Box sx={{ textAlign: "center", mt: 4 }}>
                 <Typography

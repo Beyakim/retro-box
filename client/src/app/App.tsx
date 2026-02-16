@@ -1,339 +1,296 @@
-import { useEffect, useState, useRef } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ThemeProvider, createTheme, CssBaseline } from "@mui/material";
 import { io, Socket } from "socket.io-client";
+
 import { JoinTeamScreen } from "@/app/components/JoinTeamScreen";
 import { CollectingNotesScreen } from "@/app/components/CollectingNotesScreen";
 import { RetroInProgressScreen } from "@/app/components/RetroInProgressScreen";
+import { StartRetroModal } from "./components/StartRetroModal";
+
 import { BackendNote } from "types";
 import { getClientId } from "@/clientId";
+
+const API_BASE = import.meta.env.VITE_API_BASE ?? "http://localhost:3000";
 
 const theme = createTheme({
   palette: {
     primary: { main: "#FF6B9D" },
     secondary: { main: "#C060E8" },
   },
-  typography: {
-    fontFamily:
-      '"Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif',
-  },
-  shape: { borderRadius: 12 },
 });
 
 type Screen = "join" | "collecting" | "retro";
+type PullOrder = "random" | "keep-first" | "improve-first";
 
-interface Note {
-  id: string;
-  name: string;
-  topic: string;
-  content: string;
+type RetroStartedEvent = { hostClientId: string };
+type CurrentNoteChangedEvent = {
+  currentNote: BackendNote;
+  retro: { remainingCount: number };
+};
+type TeamNameUpdatedEvent = { teamCode: string; name: string };
+
+type TeamStateResponse = {
+  team: { name: string; teamCode: string };
+  notes: { total: number };
+};
+
+type RetroStateResponse = { remainingCount: number };
+
+// ✅ תואם לשרת שלך ב-GET /teams/:teamCode/retro/state
+type RetroStateApiResponse = {
+  team: { name: string; teamCode: string };
+  retro: null | {
+    id: number;
+    status: "collecting" | "in_retro" | "closed" | string;
+    hostClientId: string | null;
+    retroNumber: number;
+  };
+  currentNote: BackendNote | null;
+  remainingCount: number;
+};
+
+async function getJson<T>(url: string, init?: RequestInit): Promise<T> {
+  const res = await fetch(url, init);
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
 }
-
-const API_BASE = import.meta.env.VITE_API_BASE ?? "http://localhost:3000";
 
 export default function App() {
   const [currentScreen, setCurrentScreen] = useState<Screen>("join");
   const [teamName, setTeamName] = useState("");
   const [teamCode, setTeamCode] = useState("");
   const [noteCount, setNoteCount] = useState(0);
-  const [currentNote, setCurrentNote] = useState<Note | null>(null);
+
+  // ✅ Single source of truth: keep the backend note as-is
+  const [currentNote, setCurrentNote] = useState<BackendNote | null>(null);
+
   const [hostClientId, setHostClientId] = useState<string | null>(null);
   const [remainingCount, setRemainingCount] = useState(0);
+  const [startRetroOpen, setStartRetroOpen] = useState(false);
 
   const socketRef = useRef<Socket | null>(null);
-  const clientId = getClientId();
+  const clientId = useMemo(() => getClientId(), []);
+  const isHost = clientId === hostClientId;
 
-  useEffect(() => {
-    fetch(`${API_BASE}/health`)
-      .then((r) => r.json())
-      .then((data) => console.log("✅ API /health:", data))
-      .catch((e) => console.error("❌ API /health failed:", e));
-  }, []);
+  // ✅ סנכרון מצב מהשרת (מי שנכנס באמצע רטרו לא מפספס)
+  const syncFromServer = useCallback(async (code: string) => {
+    const data = await getJson<RetroStateApiResponse>(
+      `${API_BASE}/teams/${code}/retro/state`,
+    );
 
-  const fetchTeamState = async (code: string) => {
-    try {
-      const res = await fetch(`${API_BASE}/teams/${code}/state`);
-      if (!res.ok) return;
+    // תמיד נעדכן שם צוות (שיהיה עקבי)
+    setTeamName(data.team.name);
 
-      const data = await res.json();
-      setNoteCount(data.notes.total);
-      console.log("📄 Synced state:", data.notes.total, "notes");
-    } catch (e) {
-      console.error("Failed to fetch team state:", e);
-    }
-  };
-
-  useEffect(() => {
-    if (!teamCode) return;
-
-    if (!socketRef.current) {
-      socketRef.current = io(API_BASE, {
-        transports: ["websocket"],
-        reconnection: true,
-      });
-      console.log("🔌 Socket connected");
-    }
-
-    const socket = socketRef.current;
-
-    socket.emit("join-team", teamCode);
-    console.log("👥 Joined team room:", teamCode);
-
-    const handleNoteAdded = () => {
-      console.log("📝 Real-time: Note added");
-      fetchTeamState(teamCode);
-    };
-
-    const handleRetroStarted = async (data: { hostClientId: string }) => {
-      console.log("🎁 Real-time: Retro started by host:", data.hostClientId);
-      setHostClientId(data.hostClientId);
-
-      // Fetch retro state to get remaining count
-      try {
-        const res = await fetch(`${API_BASE}/teams/${teamCode}/retro/state`);
-        if (res.ok) {
-          const retroData = await res.json();
-          setRemainingCount(retroData.remainingCount || 0);
-        }
-      } catch (e) {
-        console.error("Failed to fetch retro state:", e);
-      }
-
+    if (data.retro?.status === "in_retro") {
+      setHostClientId(data.retro.hostClientId ?? null);
+      setCurrentNote(data.currentNote ?? null);
+      setRemainingCount(data.remainingCount ?? 0);
       setCurrentScreen("retro");
-    };
-
-    const handleCurrentNoteChanged = (data: {
-      currentNote: BackendNote;
-      retro: { remainingCount: number };
-    }) => {
-      console.log(
-        "🎯 Real-time: Current note changed to note #",
-        data.currentNote.id
-      );
-
-      setCurrentNote({
-        id: String(data.currentNote.id),
-        name: data.currentNote.authorName || "Anonymous",
-        topic: data.currentNote.type,
-        content: data.currentNote.content,
-      });
-
-      setRemainingCount(data.retro.remainingCount);
-    };
-
-    const handleRetroClosed = async () => {
-      console.log("✅ Real-time: Retro closed");
-      setNoteCount(0);
+    } else {
       setCurrentNote(null);
       setHostClientId(null);
       setRemainingCount(0);
       setCurrentScreen("collecting");
-      await fetchTeamState(teamCode);
-    };
-
-    const handleTeamNameUpdated = (data: {
-      teamCode: string;
-      name: string;
-    }) => {
-      console.log("✏️ Real-time: Team name updated to:", data.name);
-      setTeamName(data.name);
-    };
-
-    socket.on("note-added", handleNoteAdded);
-    socket.on("retro-started", handleRetroStarted);
-    socket.on("current-note-changed", handleCurrentNoteChanged);
-    socket.on("retro-closed", handleRetroClosed);
-    socket.on("team-name-updated", handleTeamNameUpdated);
-
-    return () => {
-      socket.off("note-added", handleNoteAdded);
-      socket.off("retro-started", handleRetroStarted);
-      socket.off("current-note-changed", handleCurrentNoteChanged);
-      socket.off("retro-closed", handleRetroClosed);
-      socket.off("team-name-updated", handleTeamNameUpdated);
-      console.log("🧹 Cleaned up event handlers");
-    };
-  }, [teamCode]);
-
-  useEffect(() => {
-    return () => {
-      if (socketRef.current) {
-        socketRef.current.disconnect();
-        socketRef.current = null;
-        console.log("🔌 Socket disconnected");
-      }
-    };
+    }
   }, []);
 
-  const handleJoinTeam = async (code: string) => {
-    try {
-      const res = await fetch(`${API_BASE}/teams/${code.toUpperCase()}/state`);
-      if (!res.ok) {
-        alert("Team not found");
-        return;
+  useEffect(() => {
+    const socket = io(API_BASE, { transports: ["websocket"] });
+    socketRef.current = socket;
+
+    // אל תסתמכי רק על אירועים. ברגע שיש connect — נעשה sync אם כבר בתוך צוות.
+    socket.on("connect", () => {
+      console.log("🔌 Socket connected");
+      if (teamCode) {
+        socket.emit("join-team", teamCode);
+        syncFromServer(teamCode);
       }
-      const data = await res.json();
-      setTeamName(data.team.name);
-      setTeamCode(data.team.teamCode);
-      setNoteCount(data.notes.total);
+    });
+
+    return () => {
+      socket.disconnect();
+      socketRef.current = null;
+    };
+  }, [teamCode, syncFromServer]);
+
+  const fetchTeamState = useCallback(async (code: string) => {
+    const data = await getJson<TeamStateResponse>(
+      `${API_BASE}/teams/${code}/state`,
+    );
+    setNoteCount(data.notes.total);
+  }, []);
+
+  const fetchRetroState = useCallback(async (code: string) => {
+    const data = await getJson<RetroStateResponse>(
+      `${API_BASE}/teams/${code}/retro/state`,
+    );
+    setRemainingCount(data.remainingCount || 0);
+  }, []);
+
+  useEffect(() => {
+    const socket = socketRef.current;
+    if (!socket || !teamCode) return;
+
+    socket.emit("join-team", teamCode);
+
+    // ✅ מיד אחרי join-team נעשה sync — מכסה refresh/כניסה באמצע
+    syncFromServer(teamCode);
+
+    const onNoteAdded = () => fetchTeamState(teamCode);
+
+    const onRetroStarted = (d: RetroStartedEvent) => {
+      setHostClientId(d.hostClientId);
+      fetchRetroState(teamCode);
+      setCurrentScreen("retro");
+    };
+
+    const onCurrentNoteChanged = (d: CurrentNoteChangedEvent) => {
+      console.log("🎯 CURRENT NOTE RAW:", d.currentNote);
+      setCurrentNote(d.currentNote);
+      setRemainingCount(d.retro.remainingCount);
+    };
+
+    const onRetroClosed = () => {
+      setCurrentNote(null);
+      setHostClientId(null);
+      setRemainingCount(0);
       setCurrentScreen("collecting");
-    } catch (e) {
-      console.error(e);
-      alert("Failed to join team");
-    }
+      fetchTeamState(teamCode);
+    };
+
+    const onTeamNameUpdated = (d: TeamNameUpdatedEvent) => setTeamName(d.name);
+
+    socket.on("note-added", onNoteAdded);
+    socket.on("retro-started", onRetroStarted);
+    socket.on("current-note-changed", onCurrentNoteChanged);
+    socket.on("retro-closed", onRetroClosed);
+    socket.on("team-name-updated", onTeamNameUpdated);
+
+    return () => {
+      socket.off("note-added", onNoteAdded);
+      socket.off("retro-started", onRetroStarted);
+      socket.off("current-note-changed", onCurrentNoteChanged);
+      socket.off("retro-closed", onRetroClosed);
+      socket.off("team-name-updated", onTeamNameUpdated);
+    };
+  }, [teamCode, fetchTeamState, fetchRetroState, syncFromServer]);
+
+  const handleJoinTeam = async (code: string) => {
+    const data = await getJson<TeamStateResponse>(
+      `${API_BASE}/teams/${code.toUpperCase()}/state`,
+    );
+
+    setTeamName(data.team.name);
+    setTeamCode(data.team.teamCode);
+    setNoteCount(data.notes.total);
+
+    // ברירת מחדל, ואז sync יחליט אם צריך retro
+    setCurrentScreen("collecting");
+
+    // ✅ אם כבר באמצע רטרו — ניכנס ישר למסך הנכון
+    await syncFromServer(data.team.teamCode);
   };
 
   const handleCreateNewTeam = async () => {
-    try {
-      const teamRes = await fetch(`${API_BASE}/teams`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name: `Team ${Date.now()}` }),
-      });
-      if (!teamRes.ok) throw new Error("Failed to create team");
-      const teamData = await teamRes.json();
+    const team = await getJson<any>(`${API_BASE}/teams`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: `Team ${Date.now()}` }),
+    });
 
-      const boxRes = await fetch(
-        `${API_BASE}/teams/${teamData.teamCode}/boxes`,
-        {
-          method: "POST",
-        }
-      );
-      if (!boxRes.ok) throw new Error("Failed to create box");
+    await getJson(`${API_BASE}/teams/${team.teamCode}/boxes`, {
+      method: "POST",
+    });
 
-      setTeamName(teamData.name);
-      setTeamCode(teamData.teamCode);
-      setNoteCount(0);
-      setCurrentScreen("collecting");
-    } catch (e) {
-      console.error(e);
-      alert("Failed to create team");
-    }
+    setTeamName(team.name);
+    setTeamCode(team.teamCode);
+    setCurrentScreen("collecting");
+
+    // ✅ גם פה — sync כדי להיות עקביים
+    await syncFromServer(team.teamCode);
   };
 
-  const handleSubmitNote = async (note: {
+  const handleSubmitNote = async (n: {
     name: string;
     topic: string;
     content: string;
   }) => {
-    try {
-      const res = await fetch(`${API_BASE}/teams/${teamCode}/notes`, {
+    await getJson(`${API_BASE}/teams/${teamCode}/notes`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        type: n.topic,
+        authorName: n.name,
+        content: n.content,
+        anonymous: !n.name || n.name === "Anonymous",
+      }),
+    });
+  };
+
+  const handleStartRetro = async (pullOrder: PullOrder) => {
+    const d = await getJson<{ hostClientId: string }>(
+      `${API_BASE}/teams/${teamCode}/active-box/start-retro`,
+      {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          type: note.topic,
-          authorName: note.name,
-          content: note.content,
-          anonymous: note.name === "Anonymous" || !note.name,
-        }),
-      });
+        body: JSON.stringify({ clientId, pullOrder }),
+      },
+    );
 
-      if (res.ok) {
-        setNoteCount((prev: number) => prev + 1);
-      }
-    } catch (e) {
-      console.error(e);
-    }
-  };
-
-  const handleBackToJoin = () => {
-    if (socketRef.current) {
-      socketRef.current.disconnect();
-      socketRef.current = null;
-    }
-
-    setCurrentScreen("join");
-    setTeamName("");
-    setTeamCode("");
-    setNoteCount(0);
-    setCurrentNote(null);
-    setHostClientId(null);
-    setRemainingCount(0);
-  };
-
-  const handleStartRetro = async () => {
-    try {
-      const res = await fetch(
-        `${API_BASE}/teams/${teamCode}/active-box/start-retro`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ clientId }),
-        }
-      );
-
-      if (!res.ok) {
-        const error = await res.json();
-        console.error("Failed to start retro:", error);
-        alert("Failed to start retro");
-        return;
-      }
-
-      const data = await res.json();
-      console.log("🎁 Started retro, I am host:", data.hostClientId);
-      setHostClientId(data.hostClientId);
-
-      // Fetch retro state to get remaining count
-      const resRetro = await fetch(`${API_BASE}/teams/${teamCode}/retro/state`);
-      if (resRetro.ok) {
-        const retroData = await resRetro.json();
-        setRemainingCount(retroData.remainingCount || 0);
-        console.log("📊 Remaining notes:", retroData.remainingCount);
-      }
-
-      setCurrentScreen("retro");
-    } catch (e) {
-      console.error(e);
-      alert("Failed to start retro");
-    }
+    setHostClientId(d.hostClientId);
+    await fetchRetroState(teamCode);
+    setCurrentScreen("retro");
   };
 
   const handleEndRetro = async () => {
-    try {
-      await fetch(`${API_BASE}/teams/${teamCode}/active-box/close`, {
-        method: "POST",
-      });
-
-      await fetch(`${API_BASE}/teams/${teamCode}/boxes`, {
-        method: "POST",
-      });
-
-      console.log("Retro close requested - waiting for server event");
-    } catch (e) {
-      console.error(e);
-      alert("Failed to close retro");
-    }
+    await getJson(`${API_BASE}/teams/${teamCode}/active-box/close`, {
+      method: "POST",
+    });
+    await getJson(`${API_BASE}/teams/${teamCode}/boxes`, { method: "POST" });
   };
 
   return (
     <ThemeProvider theme={theme}>
       <CssBaseline />
+
       {currentScreen === "join" && (
         <JoinTeamScreen
           onJoin={handleJoinTeam}
           onCreateNew={handleCreateNewTeam}
         />
       )}
+
       {currentScreen === "collecting" && (
         <CollectingNotesScreen
           teamName={teamName}
           teamCode={teamCode}
           onSubmitNote={handleSubmitNote}
-          onStartRetro={handleStartRetro}
-          onBack={handleBackToJoin}
+          onStartRetro={() => setStartRetroOpen(true)}
+          onBack={() => setCurrentScreen("join")}
           noteCount={noteCount}
         />
       )}
+
       {currentScreen === "retro" && (
         <RetroInProgressScreen
           teamName={teamName}
           teamCode={teamCode}
           currentNote={currentNote}
           remainingCount={remainingCount}
-          isHost={clientId === hostClientId}
+          isHost={isHost}
           clientId={clientId}
           onBack={handleEndRetro}
         />
       )}
+
+      <StartRetroModal
+        open={startRetroOpen}
+        onClose={() => setStartRetroOpen(false)}
+        onStartRetro={(p) => {
+          setStartRetroOpen(false);
+          handleStartRetro(p);
+        }}
+      />
     </ThemeProvider>
   );
 }

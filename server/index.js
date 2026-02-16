@@ -5,16 +5,52 @@
  */
 
 require("dotenv").config();
-
+if (process.env.DATABASE_URL) {
+  const safeDbUrl = process.env.DATABASE_URL.replace(/:(.*?)@/, ":*****@");
+  console.log("DB =", safeDbUrl);
+}
 console.log("BOOT: v9-team-name-and-retro-number, file:", __filename);
 
+// ---- Notes image column detection (safe) ----
+let NOTES_IMAGE_COLUMN = null; // 'image_url' | 'image_path' | null
+
+async function detectNotesImageColumn(client) {
+  if (NOTES_IMAGE_COLUMN !== null) return NOTES_IMAGE_COLUMN;
+
+  const q = `
+    SELECT column_name
+    FROM information_schema.columns
+    WHERE table_schema = 'public'
+      AND table_name = 'notes'
+      AND column_name IN ('image_url', 'image_path')
+    LIMIT 1
+  `;
+
+  const r = await client.query(q);
+  NOTES_IMAGE_COLUMN = r.rows[0]?.column_name ?? null;
+  console.log("🧠 notes image column detected:", NOTES_IMAGE_COLUMN);
+  return NOTES_IMAGE_COLUMN;
+}
 const express = require("express");
 const cors = require("cors");
 const { createServer } = require("http");
 const { Server } = require("socket.io");
 const db = require("./db");
+const multer = require("multer");
+const path = require("path");
+const crypto = require("crypto");
+
+const fs = require("fs");
+
+const uploadsDir = path.join(__dirname, "uploads");
+if (!fs.existsSync(uploadsDir)) {
+  fs.mkdirSync(uploadsDir, { recursive: true });
+  console.log("📁 uploads folder created at:", uploadsDir);
+}
 
 const app = express();
+app.use("/uploads", express.static(uploadsDir));
+
 const httpServer = createServer(app);
 const io = new Server(httpServer, {
   cors: {
@@ -32,6 +68,7 @@ const io = new Server(httpServer, {
     credentials: true,
   },
 });
+
 /* =========================================================
    CORS + JSON
    ========================================================= */
@@ -49,10 +86,42 @@ app.use(
       if (origin && origin.includes(".vercel.app")) return callback(null, true);
       return callback(new Error("CORS: origin not allowed"));
     },
-  })
+  }),
 );
 
 app.use(express.json({ limit: "256kb" }));
+
+/* =========================================================
+   Uploads (Images)
+   ========================================================= */
+
+const storage = multer.diskStorage({
+  destination: (req, file, cb) => cb(null, uploadsDir),
+  filename: (req, file, cb) => {
+    const ext = path.extname(file.originalname);
+    const name = crypto.randomBytes(16).toString("hex") + ext;
+    cb(null, name);
+  },
+});
+
+const upload = multer({
+  storage,
+  limits: { fileSize: 5 * 1024 * 1024 }, // 5MB
+  fileFilter: (req, file, cb) => {
+    if (!file.mimetype.startsWith("image/")) {
+      return cb(new Error("Only images allowed"));
+    }
+    cb(null, true);
+  },
+});
+
+app.post("/upload", upload.single("file"), (req, res) => {
+  console.log("UPLOAD DEBUG:", { file: req.file, body: req.body });
+  if (!req.file) return res.status(400).json({ error: "Missing file" });
+
+  const imageUrl = `/uploads/${req.file.filename}`;
+  return res.json({ imageUrl });
+});
 
 /* =========================================================
    Helpers
@@ -75,7 +144,7 @@ async function getTeamByCode(teamCode) {
     `SELECT id, name, team_code AS "teamCode", created_at AS "createdAt"
      FROM public.teams
      WHERE team_code = $1`,
-    [teamCode]
+    [teamCode],
   );
   return result.rows[0] || null;
 }
@@ -90,7 +159,7 @@ async function getActiveBoxByTeamId(teamId) {
      WHERE team_id = $1 AND status <> 'closed'
      ORDER BY created_at DESC
      LIMIT 1`,
-    [teamId]
+    [teamId],
   );
   return result.rows[0] || null;
 }
@@ -125,7 +194,7 @@ app.post("/teams", async (req, res) => {
           `INSERT INTO public.teams (name, team_code)
            VALUES ($1, $2)
            RETURNING id, name, team_code AS "teamCode", created_at AS "createdAt"`,
-          [name, teamCode]
+          [name, teamCode],
         );
         createdRow = result.rows[0];
         break;
@@ -139,6 +208,21 @@ app.post("/teams", async (req, res) => {
       return res
         .status(500)
         .json({ error: "failed_to_generate_unique_team_code" });
+    }
+
+    // Auto-create first box (collecting) for the new team
+    try {
+      await db.query(
+        `INSERT INTO public.boxes (team_id, status, retro_number)
+     VALUES ($1, 'collecting', 1)`,
+        [createdRow.id],
+      );
+      console.log(
+        `📦 Auto-created first box for team ${createdRow.teamCode} (#1)`,
+      );
+    } catch (e) {
+      // If box creation fails, keep team creation but log it loudly
+      console.error("Auto-create box failed for team:", createdRow.teamCode, e);
     }
 
     return res.status(201).json(createdRow);
@@ -178,7 +262,7 @@ app.patch("/teams/:teamCode", async (req, res) => {
        SET name = $1
        WHERE team_code = $2
        RETURNING team_code AS "teamCode", name`,
-      [newName, teamCode]
+      [newName, teamCode],
     );
 
     if (result.rows.length === 0) {
@@ -218,7 +302,7 @@ app.post("/teams/:teamCode/boxes", async (req, res) => {
       `SELECT id, name, team_code AS "teamCode"
        FROM public.teams
        WHERE team_code = $1`,
-      [teamCode]
+      [teamCode],
     );
     if (teamRes.rows.length === 0) {
       await client.query("ROLLBACK");
@@ -235,7 +319,7 @@ app.post("/teams/:teamCode/boxes", async (req, res) => {
        WHERE team_id = $1 AND status <> 'closed'
        ORDER BY created_at DESC
        LIMIT 1`,
-      [team.id]
+      [team.id],
     );
 
     if (activeRes.rows.length > 0) {
@@ -250,7 +334,7 @@ app.post("/teams/:teamCode/boxes", async (req, res) => {
       `SELECT COALESCE(MAX(retro_number), 0) + 1 AS "nextNumber"
        FROM public.boxes
        WHERE team_id = $1`,
-      [team.id]
+      [team.id],
     );
     const nextRetroNumber = nextNumberRes.rows[0].nextNumber;
 
@@ -261,13 +345,13 @@ app.post("/teams/:teamCode/boxes", async (req, res) => {
                  retro_number AS "retroNumber",
                  created_at AS "createdAt", 
                  closed_at AS "closedAt"`,
-      [team.id, nextRetroNumber]
+      [team.id, nextRetroNumber],
     );
 
     await client.query("COMMIT");
 
     console.log(
-      `📦 Created box for team ${teamCode}, retro #${nextRetroNumber}`
+      `📦 Created box for team ${teamCode}, retro #${nextRetroNumber}`,
     );
 
     io.to(teamCode).emit("box-created", insertRes.rows[0]);
@@ -324,7 +408,7 @@ app.get("/teams/:teamCode/state", async (req, res) => {
        WHERE team_id = $1 AND status <> 'closed'
        ORDER BY created_at DESC
        LIMIT 1`,
-      [team.id]
+      [team.id],
     );
 
     if (boxRes.rows.length === 0) {
@@ -343,7 +427,7 @@ app.get("/teams/:teamCode/state", async (req, res) => {
          COUNT(*) FILTER (WHERE opened = false)::int AS "unopened"
        FROM public.notes
        WHERE box_id = $1`,
-      [activeBox.id]
+      [activeBox.id],
     );
 
     const notes = countsRes.rows[0] || { total: 0, unopened: 0 };
@@ -356,7 +440,7 @@ app.get("/teams/:teamCode/state", async (req, res) => {
 });
 
 /* =========================================================
-   START RETRO - Assigns Host
+   START RETRO - Assigns Host + Pull Mode
    ========================================================= */
 
 app.post("/teams/:teamCode/active-box/start-retro", async (req, res) => {
@@ -367,13 +451,22 @@ app.post("/teams/:teamCode/active-box/start-retro", async (req, res) => {
   if (!hostClientId)
     return res.status(400).json({ error: "clientId_is_required" });
 
+  console.log("DEBUG start-retro body:", req.body);
+
+  // ✅ new: pullOrder from client
+  const pullOrderRaw = req.body?.pullOrder;
+  const allowedPullOrders = new Set(["random", "keep-first", "improve-first"]);
+  const pullMode = allowedPullOrders.has(pullOrderRaw)
+    ? pullOrderRaw
+    : "sequential"; // default if not provided / invalid
+
   const client = await db.connect();
   try {
     await client.query("BEGIN");
 
     const teamRes = await client.query(
       `SELECT id FROM public.teams WHERE team_code = $1`,
-      [teamCode]
+      [teamCode],
     );
     if (teamRes.rows.length === 0) {
       await client.query("ROLLBACK");
@@ -382,15 +475,16 @@ app.post("/teams/:teamCode/active-box/start-retro", async (req, res) => {
     const teamId = teamRes.rows[0].id;
 
     const boxRes = await client.query(
-      `SELECT id, status, host_client_id AS "hostClientId", 
+      `SELECT id, status, host_client_id AS "hostClientId",
               current_note_id AS "currentNoteId",
-              retro_number AS "retroNumber"
+              retro_number AS "retroNumber",
+              pull_mode AS "pullMode"
        FROM public.boxes
        WHERE team_id = $1 AND status <> 'closed'
        ORDER BY created_at DESC
        FOR UPDATE
        LIMIT 1`,
-      [teamId]
+      [teamId],
     );
 
     if (boxRes.rows.length === 0) {
@@ -407,6 +501,7 @@ app.post("/teams/:teamCode/active-box/start-retro", async (req, res) => {
         boxId: box.id,
         hostClientId: box.hostClientId,
         retroNumber: box.retroNumber,
+        pullMode: box.pullMode ?? "sequential",
       });
     }
 
@@ -418,10 +513,12 @@ app.post("/teams/:teamCode/active-box/start-retro", async (req, res) => {
     }
 
     await client.query(
-      `UPDATE public.boxes 
-       SET status = 'in_retro', host_client_id = $1 
-       WHERE id = $2`,
-      [hostClientId, box.id]
+      `UPDATE public.boxes
+       SET status = 'in_retro',
+           host_client_id = $1,
+           pull_mode = $2
+       WHERE id = $3`,
+      [hostClientId, pullMode, box.id],
     );
 
     await client.query("COMMIT");
@@ -430,10 +527,11 @@ app.post("/teams/:teamCode/active-box/start-retro", async (req, res) => {
       boxId: box.id,
       hostClientId: hostClientId,
       retroNumber: box.retroNumber,
+      pullMode, // optional but useful
     });
 
     console.log(
-      `🎁 Retro #${box.retroNumber} started for team ${teamCode}, host: ${hostClientId}`
+      `🎁 Retro #${box.retroNumber} started for team ${teamCode}, host: ${hostClientId}, pullMode: ${pullMode}`,
     );
 
     return res.json({
@@ -441,6 +539,7 @@ app.post("/teams/:teamCode/active-box/start-retro", async (req, res) => {
       boxId: box.id,
       hostClientId: hostClientId,
       retroNumber: box.retroNumber,
+      pullMode,
     });
   } catch (err) {
     await client.query("ROLLBACK");
@@ -450,7 +549,6 @@ app.post("/teams/:teamCode/active-box/start-retro", async (req, res) => {
     client.release();
   }
 });
-
 /* =========================================================
    PULL NEXT NOTE - HOST ONLY (Facilitated)
    ========================================================= */
@@ -468,24 +566,27 @@ app.post("/teams/:teamCode/retro/pull-next", async (req, res) => {
 
     const teamRes = await client.query(
       `SELECT id FROM public.teams WHERE team_code = $1`,
-      [teamCode]
+      [teamCode],
     );
+
     if (teamRes.rows.length === 0) {
       await client.query("ROLLBACK");
       return res.status(404).json({ error: "team_not_found" });
     }
+
     const teamId = teamRes.rows[0].id;
 
     const boxRes = await client.query(
-      `SELECT id, status, host_client_id AS "hostClientId", 
+      `SELECT id, status, host_client_id AS "hostClientId",
               current_note_id AS "currentNoteId",
-              retro_number AS "retroNumber"
+              retro_number AS "retroNumber",
+              pull_mode AS "pullMode"
        FROM public.boxes
        WHERE team_id = $1 AND status <> 'closed'
        ORDER BY created_at DESC
        FOR UPDATE
        LIMIT 1`,
-      [teamId]
+      [teamId],
     );
 
     if (boxRes.rows.length === 0) {
@@ -503,11 +604,11 @@ app.post("/teams/:teamCode/retro/pull-next", async (req, res) => {
       });
     }
 
-    // CRITICAL: Only host can pull notes
+    // Only host can pull notes
     if (box.hostClientId !== clientId) {
       await client.query("ROLLBACK");
       console.log(
-        `❌ Non-host ${clientId} tried to pull note (host is ${box.hostClientId})`
+        `❌ Non-host ${clientId} tried to pull note (host is ${box.hostClientId})`,
       );
       return res.status(403).json({
         error: "not_host",
@@ -515,21 +616,52 @@ app.post("/teams/:teamCode/retro/pull-next", async (req, res) => {
       });
     }
 
-    const pick = await client.query(
-      `SELECT id
-       FROM public.notes
-       WHERE box_id = $1 AND opened = false
-       ORDER BY id ASC
-       FOR UPDATE SKIP LOCKED
-       LIMIT 1`,
-      [box.id]
-    );
+    const pullMode = box.pullMode || "sequential";
+
+    let pickSql = `
+      SELECT id
+      FROM public.notes
+      WHERE box_id = $1 AND opened = false
+    `;
+
+    if (pullMode === "random") {
+      pickSql += ` ORDER BY random() `;
+    } else if (pullMode === "keep-first") {
+      pickSql += `
+        ORDER BY
+          CASE
+            WHEN type IN ('keep','shoutout') THEN 0
+            WHEN type = 'improve' THEN 1
+            ELSE 2
+          END,
+          id ASC
+      `;
+    } else if (pullMode === "improve-first") {
+      pickSql += `
+        ORDER BY
+          CASE
+            WHEN type = 'improve' THEN 0
+            WHEN type IN ('keep','shoutout') THEN 1
+            ELSE 2
+          END,
+          id ASC
+      `;
+    } else {
+      pickSql += ` ORDER BY id ASC `;
+    }
+
+    pickSql += `
+      FOR UPDATE SKIP LOCKED
+      LIMIT 1
+    `;
+
+    const pick = await client.query(pickSql, [box.id]);
 
     const countRes = await client.query(
       `SELECT COUNT(*)::int AS remaining
        FROM public.notes
        WHERE box_id = $1 AND opened = false`,
-      [box.id]
+      [box.id],
     );
     const remainingCount = countRes.rows[0]?.remaining || 0;
 
@@ -558,23 +690,25 @@ app.post("/teams/:teamCode/retro/pull-next", async (req, res) => {
      type,
      author_name AS "authorName",
      content,
+     image_url AS "imageUrl",
      anonymous,
      opened`,
-      [noteId]
+      [noteId],
     );
 
     const note = updated.rows[0];
+
+    console.log("PULLED NOTE FROM DB =", note);
 
     await client.query(
       `UPDATE public.boxes
        SET current_note_id = $1
        WHERE id = $2`,
-      [noteId, box.id]
+      [noteId, box.id],
     );
 
     await client.query("COMMIT");
 
-    // Emit to ALL clients - they all see the same note
     io.to(teamCode).emit("current-note-changed", {
       currentNote: note,
       retro: {
@@ -586,7 +720,7 @@ app.post("/teams/:teamCode/retro/pull-next", async (req, res) => {
     });
 
     console.log(
-      `📝 Note ${noteId} revealed by host ${clientId} for team ${teamCode} (Retro #${box.retroNumber})`
+      `📝 Note ${noteId} revealed by host ${clientId} for team ${teamCode} (Retro #${box.retroNumber})`,
     );
 
     return res.json({
@@ -634,7 +768,7 @@ app.get("/teams/:teamCode/retro/state", async (req, res) => {
        WHERE team_id = $1 AND status <> 'closed'
        ORDER BY created_at DESC
        LIMIT 1`,
-      [team.id]
+      [team.id],
     );
 
     if (boxRes.rows.length === 0) {
@@ -651,12 +785,20 @@ app.get("/teams/:teamCode/retro/state", async (req, res) => {
     let currentNote = null;
     if (box.currentNoteId) {
       const noteRes = await db.query(
-        `SELECT id, box_id AS "boxId", type, author_name AS "authorName",
-                content, anonymous, opened"
-         FROM public.notes
-         WHERE id = $1`,
-        [box.currentNoteId]
+        `SELECT 
+        id,
+        box_id AS "boxId",
+        type,
+        author_name AS "authorName",
+        content,
+        image_url AS "imageUrl",
+        anonymous,
+        opened
+     FROM public.notes
+     WHERE id = $1`,
+        [box.currentNoteId],
       );
+
       currentNote = noteRes.rows[0] || null;
     }
 
@@ -666,7 +808,7 @@ app.get("/teams/:teamCode/retro/state", async (req, res) => {
          COUNT(*) FILTER (WHERE opened = false)::int AS "unopened"
        FROM public.notes
        WHERE box_id = $1`,
-      [box.id]
+      [box.id],
     );
 
     const notes = countsRes.rows[0] || { total: 0, unopened: 0 };
@@ -698,7 +840,7 @@ app.post("/teams/:teamCode/active-box/close", async (req, res) => {
 
     const teamRes = await client.query(
       `SELECT id FROM public.teams WHERE team_code = $1`,
-      [teamCode]
+      [teamCode],
     );
     if (teamRes.rows.length === 0) {
       await client.query("ROLLBACK");
@@ -713,7 +855,7 @@ app.post("/teams/:teamCode/active-box/close", async (req, res) => {
        ORDER BY created_at DESC
        FOR UPDATE
        LIMIT 1`,
-      [teamId]
+      [teamId],
     );
 
     if (boxRes.rows.length === 0) {
@@ -727,7 +869,7 @@ app.post("/teams/:teamCode/active-box/close", async (req, res) => {
       `UPDATE public.boxes
        SET status = 'closed', closed_at = NOW()
        WHERE id = $1`,
-      [box.id]
+      [box.id],
     );
 
     await client.query("COMMIT");
@@ -757,6 +899,8 @@ app.post("/teams/:teamCode/active-box/close", async (req, res) => {
 
 app.post("/teams/:teamCode/notes", async (req, res) => {
   try {
+    console.log("TEAM CODE =", req.params.teamCode);
+    console.log("DEBUG /notes body =", req.body);
     const teamCode = asTrimmedString(req.params.teamCode);
     if (!teamCode)
       return res.status(400).json({ error: "teamCode_is_required" });
@@ -776,20 +920,40 @@ app.post("/teams/:teamCode/notes", async (req, res) => {
     const type = asTrimmedString(req.body?.type);
     const authorName = asTrimmedString(req.body?.authorName);
     const content = asTrimmedString(req.body?.content);
+    const imageUrl = asTrimmedString(req.body?.imageUrl);
     const anonymous = !!req.body?.anonymous;
 
     if (!type) return res.status(400).json({ error: "type_is_required" });
-    if (!content) return res.status(400).json({ error: "content_is_required" });
+
+    // ✅ new: allow either content OR imageUrl
+    if (!content && !imageUrl) {
+      return res.status(400).json({ error: "content_or_image_required" });
+    }
+
     if (authorName.length > 50)
       return res.status(400).json({ error: "author_too_long" });
-    if (content.length > 2000)
+
+    // only validate content length if provided
+    if (content && content.length > 2000)
       return res.status(400).json({ error: "content_too_long" });
 
+    // optional: basic sanity check for imageUrl
+    if (imageUrl && !imageUrl.startsWith("/uploads/")) {
+      return res.status(400).json({ error: "invalid_image_url" });
+    }
+
     const result = await db.query(
-      `INSERT INTO public.notes (box_id, type, author_name, content, anonymous, opened)
-       VALUES ($1, $2, $3, $4, $5, false)
+      `INSERT INTO public.notes (box_id, type, author_name, content, image_url, anonymous, opened)
+       VALUES ($1, $2, $3, $4, $5, $6, false)
        RETURNING id`,
-      [activeBox.id, type, authorName || null, content, anonymous]
+      [
+        activeBox.id,
+        type,
+        authorName || null,
+        content || null,
+        imageUrl || null,
+        anonymous,
+      ],
     );
 
     io.to(teamCode).emit("note-added", {
@@ -799,6 +963,7 @@ app.post("/teams/:teamCode/notes", async (req, res) => {
 
     return res.status(201).json({ id: result.rows[0].id, boxId: activeBox.id });
   } catch (err) {
+    console.error("DEBUG /notes err =", err);
     console.error("POST /teams/:teamCode/notes failed:", err);
     return res.status(500).json({ error: "internal_error" });
   }
@@ -817,19 +982,20 @@ app.get("/teams/:teamCode/notes", async (req, res) => {
     if (!activeBox) return res.status(404).json({ error: "no_active_box" });
 
     const result = await db.query(
-      `SELECT 
+      `SELECT
         id,
         box_id AS "boxId",
         type,
         author_name AS "authorName",
         content,
+        image_url AS "imageUrl",
         anonymous,
         opened,
         created_at AS "createdAt"
       FROM public.notes
       WHERE box_id = $1
       ORDER BY created_at ASC`,
-      [activeBox.id]
+      [activeBox.id],
     );
 
     return res.json({ notes: result.rows });
@@ -893,6 +1059,6 @@ const PORT = Number(process.env.PORT) || 3000;
 
 httpServer.listen(PORT, () => {
   console.log(
-    `🚀 Server running on ${PORT} with Socket.io (Team Name + Retro Number)`
+    `🚀 Server running on ${PORT} with Socket.io (Team Name + Retro Number)`,
   );
 });
