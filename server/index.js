@@ -2,6 +2,10 @@
  * Retro Box Server (v9-team-name-and-retro-number)
  * Node.js + Express + Postgres + Socket.io
  * NEW: Edit team name + retro_number tracking
+ *
+ * FIX (Feb 2026):
+ * ✅ Ensure there is ALWAYS an active collecting box when adding notes / reading state
+ * (prevents: {"error":"no_active_box"} on POST /teams/:teamCode/notes)
  */
 
 require("dotenv").config();
@@ -11,26 +15,6 @@ if (process.env.DATABASE_URL) {
 }
 console.log("BOOT: v9-team-name-and-retro-number, file:", __filename);
 
-// ---- Notes image column detection (safe) ----
-let NOTES_IMAGE_COLUMN = null; // 'image_url' | 'image_path' | null
-
-async function detectNotesImageColumn(client) {
-  if (NOTES_IMAGE_COLUMN !== null) return NOTES_IMAGE_COLUMN;
-
-  const q = `
-    SELECT column_name
-    FROM information_schema.columns
-    WHERE table_schema = 'public'
-      AND table_name = 'notes'
-      AND column_name IN ('image_url', 'image_path')
-    LIMIT 1
-  `;
-
-  const r = await client.query(q);
-  NOTES_IMAGE_COLUMN = r.rows[0]?.column_name ?? null;
-  console.log("🧠 notes image column detected:", NOTES_IMAGE_COLUMN);
-  return NOTES_IMAGE_COLUMN;
-}
 const express = require("express");
 const cors = require("cors");
 const { createServer } = require("http");
@@ -39,8 +23,11 @@ const db = require("./db");
 const multer = require("multer");
 const path = require("path");
 const crypto = require("crypto");
-
 const fs = require("fs");
+
+/* =========================================================
+   Uploads folder
+   ========================================================= */
 
 const uploadsDir = path.join(__dirname, "uploads");
 if (!fs.existsSync(uploadsDir)) {
@@ -50,21 +37,19 @@ if (!fs.existsSync(uploadsDir)) {
 
 const app = express();
 app.use("/uploads", express.static(uploadsDir));
+
 app.get("/debug/uploads", (req, res) => {
   try {
     const exists = fs.existsSync(uploadsDir);
     const files = exists ? fs.readdirSync(uploadsDir).slice(0, 20) : [];
-    res.json({
-      uploadsDir,
-      exists,
-      sampleFiles: files,
-    });
+    res.json({ uploadsDir, exists, sampleFiles: files });
   } catch (e) {
     res.status(500).json({ error: String(e) });
   }
 });
 
 const httpServer = createServer(app);
+
 const io = new Server(httpServer, {
   cors: {
     origin: (origin, callback) => {
@@ -77,7 +62,7 @@ const io = new Server(httpServer, {
       }
       return callback(null, false);
     },
-    methods: ["GET", "POST"],
+    methods: ["GET", "POST", "PATCH"],
     credentials: true,
   },
 });
@@ -90,15 +75,16 @@ const ALLOWED_ORIGINS = new Set([
   "http://localhost:5173",
   "https://retro-box-five.vercel.app",
 ]);
+
 app.use(
   cors({
     origin(origin, callback) {
       if (!origin) return callback(null, true);
       if (ALLOWED_ORIGINS.has(origin)) return callback(null, true);
-      // Allow all Vercel deployments
       if (origin && origin.includes(".vercel.app")) return callback(null, true);
       return callback(new Error("CORS: origin not allowed"));
     },
+    credentials: true,
   }),
 );
 
@@ -124,6 +110,13 @@ const upload = multer({
     if (!file.mimetype.startsWith("image/")) {
       return cb(new Error("Only images allowed"));
     }
+
+    // Optional: block HEIC/HEIF if you want (Chrome often can't render)
+    const ext = path.extname(file.originalname).toLowerCase();
+    if (ext === ".heic" || ext === ".heif") {
+      return cb(new Error("HEIC not supported. Please upload JPG/PNG/WebP."));
+    }
+
     cb(null, true);
   },
 });
@@ -147,8 +140,9 @@ function asTrimmedString(value) {
 function generateTeamCode(len = 6) {
   const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
   let out = "";
-  for (let i = 0; i < len; i++)
+  for (let i = 0; i < len; i++) {
     out += chars[Math.floor(Math.random() * chars.length)];
+  }
   return out;
 }
 
@@ -164,9 +158,9 @@ async function getTeamByCode(teamCode) {
 
 async function getActiveBoxByTeamId(teamId) {
   const result = await db.query(
-    `SELECT id, team_id AS "teamId", status, 
+    `SELECT id, team_id AS "teamId", status,
             retro_number AS "retroNumber",
-            created_at AS "createdAt", 
+            created_at AS "createdAt",
             closed_at AS "closedAt"
      FROM public.boxes
      WHERE team_id = $1 AND status <> 'closed'
@@ -175,6 +169,52 @@ async function getActiveBoxByTeamId(teamId) {
     [teamId],
   );
   return result.rows[0] || null;
+}
+
+/**
+ * ✅ CRITICAL INVARIANT:
+ * Always have an active box (status <> 'closed').
+ * If none exists → create a new 'collecting' box with next retro_number.
+ */
+async function ensureActiveBoxByTeamId(teamId) {
+  const existing = await db.query(
+    `SELECT id, team_id AS "teamId", status,
+            retro_number AS "retroNumber",
+            created_at AS "createdAt",
+            closed_at AS "closedAt"
+     FROM public.boxes
+     WHERE team_id = $1 AND status <> 'closed'
+     ORDER BY created_at DESC
+     LIMIT 1`,
+    [teamId],
+  );
+
+  if (existing.rows.length > 0) return existing.rows[0];
+
+  const nextNumberRes = await db.query(
+    `SELECT COALESCE(MAX(retro_number), 0) + 1 AS next
+     FROM public.boxes
+     WHERE team_id = $1`,
+    [teamId],
+  );
+
+  const nextRetroNumber = nextNumberRes.rows[0].next;
+
+  const insertRes = await db.query(
+    `INSERT INTO public.boxes (team_id, status, retro_number)
+     VALUES ($1, 'collecting', $2)
+     RETURNING id, team_id AS "teamId", status,
+               retro_number AS "retroNumber",
+               created_at AS "createdAt",
+               closed_at AS "closedAt"`,
+    [teamId, nextRetroNumber],
+  );
+
+  console.log(
+    `📦 ensureActiveBoxByTeamId: created collecting box #${nextRetroNumber} for teamId=${teamId}`,
+  );
+
+  return insertRes.rows[0];
 }
 
 /* =========================================================
@@ -223,18 +263,17 @@ app.post("/teams", async (req, res) => {
         .json({ error: "failed_to_generate_unique_team_code" });
     }
 
-    // Auto-create first box (collecting) for the new team
+    // Auto-create first box for the new team
     try {
       await db.query(
         `INSERT INTO public.boxes (team_id, status, retro_number)
-     VALUES ($1, 'collecting', 1)`,
+         VALUES ($1, 'collecting', 1)`,
         [createdRow.id],
       );
       console.log(
         `📦 Auto-created first box for team ${createdRow.teamCode} (#1)`,
       );
     } catch (e) {
-      // If box creation fails, keep team creation but log it loudly
       console.error("Auto-create box failed for team:", createdRow.teamCode, e);
     }
 
@@ -246,7 +285,7 @@ app.post("/teams", async (req, res) => {
 });
 
 /* =========================================================
-   NEW: PATCH Team Name
+   PATCH Team Name
    ========================================================= */
 
 app.patch("/teams/:teamCode", async (req, res) => {
@@ -254,21 +293,13 @@ app.patch("/teams/:teamCode", async (req, res) => {
     const teamCode = asTrimmedString(req.params.teamCode);
     const newName = asTrimmedString(req.body?.name);
 
-    if (!teamCode) {
+    if (!teamCode)
       return res.status(400).json({ error: "teamCode_is_required" });
-    }
-
-    if (!newName) {
-      return res.status(400).json({ error: "name_is_required" });
-    }
-
-    if (newName.length < 2) {
+    if (!newName) return res.status(400).json({ error: "name_is_required" });
+    if (newName.length < 2)
       return res.status(400).json({ error: "name_too_short", minLength: 2 });
-    }
-
-    if (newName.length > 50) {
+    if (newName.length > 50)
       return res.status(400).json({ error: "name_too_long", maxLength: 50 });
-    }
 
     const result = await db.query(
       `UPDATE public.teams
@@ -284,14 +315,12 @@ app.patch("/teams/:teamCode", async (req, res) => {
 
     const updated = result.rows[0];
 
-    // Emit real-time update to team room
     io.to(teamCode).emit("team-name-updated", {
       teamCode: updated.teamCode,
       name: updated.name,
     });
 
     console.log(`✏️ Team ${teamCode} renamed to: ${newName}`);
-
     return res.json(updated);
   } catch (err) {
     console.error("PATCH /teams/:teamCode failed:", err);
@@ -324,9 +353,9 @@ app.post("/teams/:teamCode/boxes", async (req, res) => {
     const team = teamRes.rows[0];
 
     const activeRes = await client.query(
-      `SELECT id, team_id AS "teamId", status, 
+      `SELECT id, team_id AS "teamId", status,
               retro_number AS "retroNumber",
-              created_at AS "createdAt", 
+              created_at AS "createdAt",
               closed_at AS "closedAt"
        FROM public.boxes
        WHERE team_id = $1 AND status <> 'closed'
@@ -342,7 +371,6 @@ app.post("/teams/:teamCode/boxes", async (req, res) => {
         .json({ team, box: activeRes.rows[0], created: false });
     }
 
-    // Determine next retro_number for this team
     const nextNumberRes = await client.query(
       `SELECT COALESCE(MAX(retro_number), 0) + 1 AS "nextNumber"
        FROM public.boxes
@@ -354,9 +382,9 @@ app.post("/teams/:teamCode/boxes", async (req, res) => {
     const insertRes = await client.query(
       `INSERT INTO public.boxes (team_id, status, retro_number)
        VALUES ($1, 'collecting', $2)
-       RETURNING id, team_id AS "teamId", status, 
+       RETURNING id, team_id AS "teamId", status,
                  retro_number AS "retroNumber",
-                 created_at AS "createdAt", 
+                 created_at AS "createdAt",
                  closed_at AS "closedAt"`,
       [team.id, nextRetroNumber],
     );
@@ -366,7 +394,6 @@ app.post("/teams/:teamCode/boxes", async (req, res) => {
     console.log(
       `📦 Created box for team ${teamCode}, retro #${nextRetroNumber}`,
     );
-
     io.to(teamCode).emit("box-created", insertRes.rows[0]);
 
     return res
@@ -390,9 +417,8 @@ app.get("/teams/:teamCode/active-box", async (req, res) => {
     const team = await getTeamByCode(teamCode);
     if (!team) return res.status(404).json({ error: "team_not_found" });
 
-    const box = await getActiveBoxByTeamId(team.id);
-    if (!box) return res.status(404).json({ error: "no_active_box" });
-
+    // ✅ ensure active box
+    const box = await ensureActiveBoxByTeamId(team.id);
     return res.json({ team, box });
   } catch (err) {
     console.error("GET /teams/:teamCode/active-box failed:", err);
@@ -403,36 +429,14 @@ app.get("/teams/:teamCode/active-box", async (req, res) => {
 app.get("/teams/:teamCode/state", async (req, res) => {
   try {
     const teamCode = asTrimmedString(req.params.teamCode);
-    if (!teamCode) {
+    if (!teamCode)
       return res.status(400).json({ error: "teamCode_is_required" });
-    }
 
     const team = await getTeamByCode(teamCode);
-    if (!team) {
-      return res.status(404).json({ error: "team_not_found" });
-    }
+    if (!team) return res.status(404).json({ error: "team_not_found" });
 
-    const boxRes = await db.query(
-      `SELECT id, team_id AS "teamId", status, 
-              retro_number AS "retroNumber",
-              created_at AS "createdAt", 
-              closed_at AS "closedAt"
-       FROM public.boxes
-       WHERE team_id = $1 AND status <> 'closed'
-       ORDER BY created_at DESC
-       LIMIT 1`,
-      [team.id],
-    );
-
-    if (boxRes.rows.length === 0) {
-      return res.json({
-        team,
-        activeBox: null,
-        notes: { total: 0, unopened: 0 },
-      });
-    }
-
-    const activeBox = boxRes.rows[0];
+    // ✅ ensure active box
+    const activeBox = await ensureActiveBoxByTeamId(team.id);
 
     const countsRes = await db.query(
       `SELECT
@@ -453,7 +457,7 @@ app.get("/teams/:teamCode/state", async (req, res) => {
 });
 
 /* =========================================================
-   START RETRO - Assigns Host + Pull Mode
+   START RETRO - Assign Host + Pull Mode
    ========================================================= */
 
 app.post("/teams/:teamCode/active-box/start-retro", async (req, res) => {
@@ -466,12 +470,11 @@ app.post("/teams/:teamCode/active-box/start-retro", async (req, res) => {
 
   console.log("DEBUG start-retro body:", req.body);
 
-  // ✅ new: pullOrder from client
   const pullOrderRaw = req.body?.pullOrder;
   const allowedPullOrders = new Set(["random", "keep-first", "improve-first"]);
   const pullMode = allowedPullOrders.has(pullOrderRaw)
     ? pullOrderRaw
-    : "sequential"; // default if not provided / invalid
+    : "sequential";
 
   const client = await db.connect();
   try {
@@ -487,6 +490,8 @@ app.post("/teams/:teamCode/active-box/start-retro", async (req, res) => {
     }
     const teamId = teamRes.rows[0].id;
 
+    // ✅ ensure there is an active box before start
+    // BUT: start-retro logic expects row lock, so we continue with FOR UPDATE query
     const boxRes = await client.query(
       `SELECT id, status, host_client_id AS "hostClientId",
               current_note_id AS "currentNoteId",
@@ -501,13 +506,54 @@ app.post("/teams/:teamCode/active-box/start-retro", async (req, res) => {
     );
 
     if (boxRes.rows.length === 0) {
-      await client.query("ROLLBACK");
-      return res.status(404).json({ error: "no_active_box" });
+      // no active box at all → create one (collecting) inside tx, then refetch FOR UPDATE
+      const nextNumberRes = await client.query(
+        `SELECT COALESCE(MAX(retro_number), 0) + 1 AS next
+         FROM public.boxes
+         WHERE team_id = $1`,
+        [teamId],
+      );
+      const nextRetroNumber = nextNumberRes.rows[0].next;
+
+      await client.query(
+        `INSERT INTO public.boxes (team_id, status, retro_number)
+         VALUES ($1, 'collecting', $2)`,
+        [teamId, nextRetroNumber],
+      );
+
+      const refetch = await client.query(
+        `SELECT id, status, host_client_id AS "hostClientId",
+                current_note_id AS "currentNoteId",
+                retro_number AS "retroNumber",
+                pull_mode AS "pullMode"
+         FROM public.boxes
+         WHERE team_id = $1 AND status <> 'closed'
+         ORDER BY created_at DESC
+         FOR UPDATE
+         LIMIT 1`,
+        [teamId],
+      );
+
+      if (refetch.rows.length === 0) {
+        await client.query("ROLLBACK");
+        return res.status(500).json({ error: "failed_to_create_active_box" });
+      }
+
+      boxRes.rows.push(refetch.rows[0]);
     }
 
     const box = boxRes.rows[0];
 
     if (box.status === "in_retro") {
+      if (box.hostClientId && box.hostClientId !== hostClientId) {
+        await client.query("ROLLBACK");
+        return res.status(403).json({
+          error: "not_host",
+          message: "Retro already started by another host",
+          hostClientId: box.hostClientId,
+        });
+      }
+
       await client.query("COMMIT");
       return res.json({
         message: "already_in_retro",
@@ -525,10 +571,19 @@ app.post("/teams/:teamCode/active-box/start-retro", async (req, res) => {
         .json({ error: "invalid_box_status", status: box.status });
     }
 
+    if (box.hostClientId && box.hostClientId !== hostClientId) {
+      await client.query("ROLLBACK");
+      return res.status(403).json({
+        error: "not_host",
+        message: "Only the host who created this retro can start it",
+        hostClientId: box.hostClientId,
+      });
+    }
+
     await client.query(
       `UPDATE public.boxes
        SET status = 'in_retro',
-           host_client_id = $1,
+           host_client_id = COALESCE(host_client_id, $1),
            pull_mode = $2
        WHERE id = $3`,
       [hostClientId, pullMode, box.id],
@@ -538,9 +593,9 @@ app.post("/teams/:teamCode/active-box/start-retro", async (req, res) => {
 
     io.to(teamCode).emit("retro-started", {
       boxId: box.id,
-      hostClientId: hostClientId,
+      hostClientId,
       retroNumber: box.retroNumber,
-      pullMode, // optional but useful
+      pullMode,
     });
 
     console.log(
@@ -550,7 +605,7 @@ app.post("/teams/:teamCode/active-box/start-retro", async (req, res) => {
     return res.json({
       message: "retro_started",
       boxId: box.id,
-      hostClientId: hostClientId,
+      hostClientId,
       retroNumber: box.retroNumber,
       pullMode,
     });
@@ -562,8 +617,9 @@ app.post("/teams/:teamCode/active-box/start-retro", async (req, res) => {
     client.release();
   }
 });
+
 /* =========================================================
-   PULL NEXT NOTE - HOST ONLY (Facilitated)
+   PULL NEXT NOTE - HOST ONLY
    ========================================================= */
 
 app.post("/teams/:teamCode/retro/pull-next", async (req, res) => {
@@ -581,12 +637,10 @@ app.post("/teams/:teamCode/retro/pull-next", async (req, res) => {
       `SELECT id FROM public.teams WHERE team_code = $1`,
       [teamCode],
     );
-
     if (teamRes.rows.length === 0) {
       await client.query("ROLLBACK");
       return res.status(404).json({ error: "team_not_found" });
     }
-
     const teamId = teamRes.rows[0].id;
 
     const boxRes = await client.query(
@@ -611,22 +665,22 @@ app.post("/teams/:teamCode/retro/pull-next", async (req, res) => {
 
     if (box.status !== "in_retro") {
       await client.query("ROLLBACK");
-      return res.status(409).json({
-        error: "retro_not_in_progress",
-        status: box.status,
-      });
+      return res
+        .status(409)
+        .json({ error: "retro_not_in_progress", status: box.status });
     }
 
-    // Only host can pull notes
     if (box.hostClientId !== clientId) {
       await client.query("ROLLBACK");
       console.log(
         `❌ Non-host ${clientId} tried to pull note (host is ${box.hostClientId})`,
       );
-      return res.status(403).json({
-        error: "not_host",
-        message: "Only the facilitator can pull notes",
-      });
+      return res
+        .status(403)
+        .json({
+          error: "not_host",
+          message: "Only the facilitator can pull notes",
+        });
     }
 
     const pullMode = box.pullMode || "sequential";
@@ -695,23 +749,21 @@ app.post("/teams/:teamCode/retro/pull-next", async (req, res) => {
 
     const updated = await client.query(
       `UPDATE public.notes
-   SET opened = true
-   WHERE id = $1
-   RETURNING
-     id,
-     box_id AS "boxId",
-     type,
-     author_name AS "authorName",
-     content,
-     image_url AS "imageUrl",
-     anonymous,
-     opened`,
+       SET opened = true
+       WHERE id = $1
+       RETURNING
+         id,
+         box_id AS "boxId",
+         type,
+         author_name AS "authorName",
+         content,
+         image_url AS "imageUrl",
+         anonymous,
+         opened`,
       [noteId],
     );
 
     const note = updated.rows[0];
-
-    console.log("PULLED NOTE FROM DB =", note);
 
     await client.query(
       `UPDATE public.boxes
@@ -726,21 +778,17 @@ app.post("/teams/:teamCode/retro/pull-next", async (req, res) => {
       currentNote: note,
       retro: {
         status: box.status,
-        remainingCount: remainingCount - 1,
+        remainingCount: Math.max(remainingCount - 1, 0),
         hostClientId: box.hostClientId,
         retroNumber: box.retroNumber,
       },
     });
 
-    console.log(
-      `📝 Note ${noteId} revealed by host ${clientId} for team ${teamCode} (Retro #${box.retroNumber})`,
-    );
-
     return res.json({
       currentNote: note,
       retro: {
         status: box.status,
-        remainingCount: remainingCount - 1,
+        remainingCount: Math.max(remainingCount - 1, 0),
         hostClientId: box.hostClientId,
         retroNumber: box.retroNumber,
       },
@@ -755,63 +803,37 @@ app.post("/teams/:teamCode/retro/pull-next", async (req, res) => {
 });
 
 /* =========================================================
-   GET RETRO STATE - Current note for all clients
+   GET RETRO STATE
    ========================================================= */
 
 app.get("/teams/:teamCode/retro/state", async (req, res) => {
   try {
     const teamCode = asTrimmedString(req.params.teamCode);
-    if (!teamCode) {
+    if (!teamCode)
       return res.status(400).json({ error: "teamCode_is_required" });
-    }
 
     const team = await getTeamByCode(teamCode);
-    if (!team) {
-      return res.status(404).json({ error: "team_not_found" });
-    }
+    if (!team) return res.status(404).json({ error: "team_not_found" });
 
-    const boxRes = await db.query(
-      `SELECT id, team_id AS "teamId", status, 
-              host_client_id AS "hostClientId",
-              current_note_id AS "currentNoteId",
-              retro_number AS "retroNumber",
-              created_at AS "createdAt", 
-              closed_at AS "closedAt"
-       FROM public.boxes
-       WHERE team_id = $1 AND status <> 'closed'
-       ORDER BY created_at DESC
-       LIMIT 1`,
-      [team.id],
-    );
-
-    if (boxRes.rows.length === 0) {
-      return res.json({
-        team,
-        retro: null,
-        currentNote: null,
-        remainingCount: 0,
-      });
-    }
-
-    const box = boxRes.rows[0];
+    // ✅ ensure active box (may be collecting)
+    const box = await ensureActiveBoxByTeamId(team.id);
 
     let currentNote = null;
-    if (box.currentNoteId) {
+    if (box.status === "in_retro" && box.currentNoteId) {
       const noteRes = await db.query(
-        `SELECT 
-        id,
-        box_id AS "boxId",
-        type,
-        author_name AS "authorName",
-        content,
-        image_url AS "imageUrl",
-        anonymous,
-        opened
-     FROM public.notes
-     WHERE id = $1`,
+        `SELECT
+          id,
+          box_id AS "boxId",
+          type,
+          author_name AS "authorName",
+          content,
+          image_url AS "imageUrl",
+          anonymous,
+          opened
+         FROM public.notes
+         WHERE id = $1`,
         [box.currentNoteId],
       );
-
       currentNote = noteRes.rows[0] || null;
     }
 
@@ -831,7 +853,7 @@ app.get("/teams/:teamCode/retro/state", async (req, res) => {
       retro: {
         id: box.id,
         status: box.status,
-        hostClientId: box.hostClientId,
+        hostClientId: box.hostClientId ?? null,
         retroNumber: box.retroNumber,
       },
       currentNote,
@@ -842,6 +864,10 @@ app.get("/teams/:teamCode/retro/state", async (req, res) => {
     return res.status(500).json({ error: "internal_error" });
   }
 });
+
+/* =========================================================
+   CLOSE RETRO (host gating is already done by "notes remaining" rule)
+   ========================================================= */
 
 app.post("/teams/:teamCode/active-box/close", async (req, res) => {
   const teamCode = asTrimmedString(req.params.teamCode);
@@ -855,10 +881,12 @@ app.post("/teams/:teamCode/active-box/close", async (req, res) => {
       `SELECT id FROM public.teams WHERE team_code = $1`,
       [teamCode],
     );
+
     if (teamRes.rows.length === 0) {
       await client.query("ROLLBACK");
       return res.status(404).json({ error: "team_not_found" });
     }
+
     const teamId = teamRes.rows[0].id;
 
     const boxRes = await client.query(
@@ -872,34 +900,87 @@ app.post("/teams/:teamCode/active-box/close", async (req, res) => {
     );
 
     if (boxRes.rows.length === 0) {
-      await client.query("ROLLBACK");
-      return res.status(404).json({ error: "no_active_box" });
+      // even this: create collecting box and treat as "nothing to close"
+      const nextNumberRes = await client.query(
+        `SELECT COALESCE(MAX(retro_number), 0) + 1 AS next
+         FROM public.boxes
+         WHERE team_id = $1`,
+        [teamId],
+      );
+
+      const nextRetroNumber = nextNumberRes.rows[0].next;
+      await client.query(
+        `INSERT INTO public.boxes (team_id, status, retro_number)
+         VALUES ($1, 'collecting', $2)`,
+        [teamId, nextRetroNumber],
+      );
+
+      await client.query("COMMIT");
+      return res.json({
+        message: "no_box_to_close_but_created_collecting",
+        createdRetroNumber: nextRetroNumber,
+      });
     }
 
     const box = boxRes.rows[0];
 
+    const remainingRes = await client.query(
+      `SELECT COUNT(*)::int AS remaining
+       FROM public.notes
+       WHERE box_id = $1 AND opened = false`,
+      [box.id],
+    );
+
+    const remaining = remainingRes.rows[0].remaining;
+
+    if (remaining > 0) {
+      await client.query("ROLLBACK");
+      return res.status(400).json({
+        error: "notes_remaining",
+        message: "Cannot close retro before all notes are revealed",
+        remaining,
+      });
+    }
+
     await client.query(
       `UPDATE public.boxes
-       SET status = 'closed', closed_at = NOW()
+       SET status = 'closed',
+           closed_at = NOW()
        WHERE id = $1`,
       [box.id],
     );
 
-    await client.query("COMMIT");
+    const nextNumberRes = await client.query(
+      `SELECT COALESCE(MAX(retro_number), 0) + 1 AS next
+       FROM public.boxes
+       WHERE team_id = $1`,
+      [teamId],
+    );
 
-    console.log(`✅ Closed retro #${box.retroNumber} for team ${teamCode}`);
+    const nextRetroNumber = nextNumberRes.rows[0].next;
+
+    await client.query(
+      `INSERT INTO public.boxes (team_id, status, retro_number)
+       VALUES ($1, 'collecting', $2)`,
+      [teamId, nextRetroNumber],
+    );
+
+    await client.query("COMMIT");
 
     io.to(teamCode).emit("retro-closed", { boxId: box.id });
 
+    console.log(
+      `✅ Closed retro #${box.retroNumber} and created new collecting box #${nextRetroNumber}`,
+    );
+
     return res.json({
-      message: "box_closed",
-      boxId: box.id,
-      previousStatus: box.status,
-      retroNumber: box.retroNumber,
+      message: "retro_closed",
+      previousRetroNumber: box.retroNumber,
+      createdRetroNumber: nextRetroNumber,
     });
   } catch (err) {
     await client.query("ROLLBACK");
-    console.error("POST /teams/:teamCode/active-box/close failed:", err);
+    console.error("Close retro failed:", err);
     return res.status(500).json({ error: "internal_error" });
   } finally {
     client.release();
@@ -914,6 +995,7 @@ app.post("/teams/:teamCode/notes", async (req, res) => {
   try {
     console.log("TEAM CODE =", req.params.teamCode);
     console.log("DEBUG /notes body =", req.body);
+
     const teamCode = asTrimmedString(req.params.teamCode);
     if (!teamCode)
       return res.status(400).json({ error: "teamCode_is_required" });
@@ -921,8 +1003,8 @@ app.post("/teams/:teamCode/notes", async (req, res) => {
     const team = await getTeamByCode(teamCode);
     if (!team) return res.status(404).json({ error: "team_not_found" });
 
-    const activeBox = await getActiveBoxByTeamId(team.id);
-    if (!activeBox) return res.status(404).json({ error: "no_active_box" });
+    // ✅ ensure active box always exists
+    const activeBox = await ensureActiveBoxByTeamId(team.id);
 
     if (activeBox.status !== "collecting") {
       return res
@@ -937,20 +1019,14 @@ app.post("/teams/:teamCode/notes", async (req, res) => {
     const anonymous = !!req.body?.anonymous;
 
     if (!type) return res.status(400).json({ error: "type_is_required" });
-
-    // ✅ new: allow either content OR imageUrl
     if (!content && !imageUrl) {
       return res.status(400).json({ error: "content_or_image_required" });
     }
 
     if (authorName.length > 50)
       return res.status(400).json({ error: "author_too_long" });
-
-    // only validate content length if provided
     if (content && content.length > 2000)
       return res.status(400).json({ error: "content_too_long" });
-
-    // optional: basic sanity check for imageUrl
     if (imageUrl && !imageUrl.startsWith("/uploads/")) {
       return res.status(400).json({ error: "invalid_image_url" });
     }
@@ -973,7 +1049,6 @@ app.post("/teams/:teamCode/notes", async (req, res) => {
       noteId: result.rows[0].id,
       boxId: activeBox.id,
     });
-
     return res.status(201).json({ id: result.rows[0].id, boxId: activeBox.id });
   } catch (err) {
     console.error("DEBUG /notes err =", err);
@@ -991,8 +1066,8 @@ app.get("/teams/:teamCode/notes", async (req, res) => {
     const team = await getTeamByCode(teamCode);
     if (!team) return res.status(404).json({ error: "team_not_found" });
 
-    const activeBox = await getActiveBoxByTeamId(team.id);
-    if (!activeBox) return res.status(404).json({ error: "no_active_box" });
+    // ✅ ensure active box always exists
+    const activeBox = await ensureActiveBoxByTeamId(team.id);
 
     const result = await db.query(
       `SELECT
@@ -1011,7 +1086,7 @@ app.get("/teams/:teamCode/notes", async (req, res) => {
       [activeBox.id],
     );
 
-    return res.json({ notes: result.rows });
+    return res.json({ notes: result.rows, boxId: activeBox.id });
   } catch (err) {
     console.error("GET /teams/:teamCode/notes failed:", err);
     return res.status(500).json({ error: "internal_error" });

@@ -7,7 +7,7 @@ import { CollectingNotesScreen } from "@/app/components/CollectingNotesScreen";
 import { RetroInProgressScreen } from "@/app/components/RetroInProgressScreen";
 import { StartRetroModal } from "./components/StartRetroModal";
 
-import { BackendNote } from "types";
+import type { BackendNote } from "types";
 import { getClientId } from "@/clientId";
 
 const API_BASE = import.meta.env.VITE_API_BASE ?? "http://localhost:3000";
@@ -36,7 +36,6 @@ type TeamStateResponse = {
 
 type RetroStateResponse = { remainingCount: number };
 
-// ✅ תואם לשרת שלך ב-GET /teams/:teamCode/retro/state
 type RetroStateApiResponse = {
   team: { name: string; teamCode: string };
   retro: null | {
@@ -49,8 +48,12 @@ type RetroStateApiResponse = {
   remainingCount: number;
 };
 
-async function getJson<T>(url: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(url, init);
+async function getJson<T>(url: string, init: RequestInit = {}): Promise<T> {
+  const headers = new Headers(init.headers || {});
+  // ✅ תמיד מוסיפים client-id, בלי לדרוס headers אחרים
+  if (!headers.has("x-client-id")) headers.set("x-client-id", getClientId());
+
+  const res = await fetch(url, { ...init, headers });
   if (!res.ok) throw new Error(await res.text());
   return res.json();
 }
@@ -61,24 +64,22 @@ export default function App() {
   const [teamCode, setTeamCode] = useState("");
   const [noteCount, setNoteCount] = useState(0);
 
-  // ✅ Single source of truth: keep the backend note as-is
   const [currentNote, setCurrentNote] = useState<BackendNote | null>(null);
-
   const [hostClientId, setHostClientId] = useState<string | null>(null);
   const [remainingCount, setRemainingCount] = useState(0);
   const [startRetroOpen, setStartRetroOpen] = useState(false);
 
   const socketRef = useRef<Socket | null>(null);
+
+  // ✅ clientId יציב לכל סשן
   const clientId = useMemo(() => getClientId(), []);
   const isHost = clientId === hostClientId;
 
-  // ✅ סנכרון מצב מהשרת (מי שנכנס באמצע רטרו לא מפספס)
   const syncFromServer = useCallback(async (code: string) => {
     const data = await getJson<RetroStateApiResponse>(
       `${API_BASE}/teams/${code}/retro/state`,
     );
 
-    // תמיד נעדכן שם צוות (שיהיה עקבי)
     setTeamName(data.team.name);
 
     if (data.retro?.status === "in_retro") {
@@ -94,25 +95,6 @@ export default function App() {
     }
   }, []);
 
-  useEffect(() => {
-    const socket = io(API_BASE, { transports: ["websocket"] });
-    socketRef.current = socket;
-
-    // אל תסתמכי רק על אירועים. ברגע שיש connect — נעשה sync אם כבר בתוך צוות.
-    socket.on("connect", () => {
-      console.log("🔌 Socket connected");
-      if (teamCode) {
-        socket.emit("join-team", teamCode);
-        syncFromServer(teamCode);
-      }
-    });
-
-    return () => {
-      socket.disconnect();
-      socketRef.current = null;
-    };
-  }, [teamCode, syncFromServer]);
-
   const fetchTeamState = useCallback(async (code: string) => {
     const data = await getJson<TeamStateResponse>(
       `${API_BASE}/teams/${code}/state`,
@@ -127,13 +109,31 @@ export default function App() {
     setRemainingCount(data.remainingCount || 0);
   }, []);
 
+  // ✅ יצירת socket פעם אחת, וחיבור מחדש לאותו teamCode כשמשתנה
+  useEffect(() => {
+    const socket = io(API_BASE, { transports: ["websocket"] });
+    socketRef.current = socket;
+
+    socket.on("connect", () => {
+      console.log("🔌 Socket connected");
+      if (teamCode) {
+        socket.emit("join-team", teamCode);
+        syncFromServer(teamCode);
+      }
+    });
+
+    return () => {
+      socket.disconnect();
+      socketRef.current = null;
+    };
+  }, [teamCode, syncFromServer]);
+
+  // ✅ listeners לפי teamCode
   useEffect(() => {
     const socket = socketRef.current;
     if (!socket || !teamCode) return;
 
     socket.emit("join-team", teamCode);
-
-    // ✅ מיד אחרי join-team נעשה sync — מכסה refresh/כניסה באמצע
     syncFromServer(teamCode);
 
     const onNoteAdded = () => fetchTeamState(teamCode);
@@ -150,12 +150,22 @@ export default function App() {
       setRemainingCount(d.retro.remainingCount);
     };
 
-    const onRetroClosed = () => {
+    const onRetroClosed = async () => {
       setCurrentNote(null);
       setHostClientId(null);
       setRemainingCount(0);
-      setCurrentScreen("collecting");
-      fetchTeamState(teamCode);
+
+      // ✅ אחרי close, תמיד נוודא שיש קופסה collecting חדשה
+      try {
+        await getJson(`${API_BASE}/teams/${teamCode}/boxes`, {
+          method: "POST",
+        });
+      } catch (e) {
+        console.error("Auto-create box after close failed:", e);
+      }
+
+      await fetchTeamState(teamCode);
+      await syncFromServer(teamCode);
     };
 
     const onTeamNameUpdated = (d: TeamNameUpdatedEvent) => setTeamName(d.name);
@@ -184,10 +194,7 @@ export default function App() {
     setTeamCode(data.team.teamCode);
     setNoteCount(data.notes.total);
 
-    // ברירת מחדל, ואז sync יחליט אם צריך retro
-    setCurrentScreen("collecting");
-
-    // ✅ אם כבר באמצע רטרו — ניכנס ישר למסך הנכון
+    // let sync decide correct screen
     await syncFromServer(data.team.teamCode);
   };
 
@@ -198,15 +205,15 @@ export default function App() {
       body: JSON.stringify({ name: `Team ${Date.now()}` }),
     });
 
+    // ✅ מוודאים שיש קופסה collecting
     await getJson(`${API_BASE}/teams/${team.teamCode}/boxes`, {
       method: "POST",
     });
 
     setTeamName(team.name);
     setTeamCode(team.teamCode);
-    setCurrentScreen("collecting");
 
-    // ✅ גם פה — sync כדי להיות עקביים
+    await fetchTeamState(team.teamCode);
     await syncFromServer(team.teamCode);
   };
 
@@ -225,6 +232,8 @@ export default function App() {
         anonymous: !n.name || n.name === "Anonymous",
       }),
     });
+
+    await fetchTeamState(teamCode);
   };
 
   const handleStartRetro = async (pullOrder: PullOrder) => {
@@ -233,6 +242,7 @@ export default function App() {
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
+        // ✅ השרת שלך תומך ב-body.clientId או header
         body: JSON.stringify({ clientId, pullOrder }),
       },
     );
@@ -243,10 +253,22 @@ export default function App() {
   };
 
   const handleEndRetro = async () => {
-    await getJson(`${API_BASE}/teams/${teamCode}/active-box/close`, {
-      method: "POST",
-    });
-    await getJson(`${API_BASE}/teams/${teamCode}/boxes`, { method: "POST" });
+    try {
+      await getJson(`${API_BASE}/teams/${teamCode}/active-box/close`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+      });
+
+      await syncFromServer(teamCode); // ✅ הכי חשוב
+    } catch (err: any) {
+      const msg = String(err?.message ?? err);
+      if (msg.includes("notes_remaining")) {
+        alert("אי אפשר לסיים רטרו לפני שכל הפתקים נפתחו 🙂");
+        return;
+      }
+      console.error(err);
+      alert("End retro failed");
+    }
   };
 
   return (

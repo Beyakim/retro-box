@@ -386,23 +386,37 @@ export function RetroInProgressScreen({
             )}
           </Box>
         </Box>
-
         <Box sx={{ textAlign: "center", mt: 6 }}>
           <Button
             variant="text"
-            onClick={onBack}
+            onClick={() => {
+              // 🔒 לא מאפשרים לסיים אם נשארו פתקים
+              if (!allNotesRevealed) return;
+              onBack();
+            }}
+            disabled={!allNotesRevealed}
             sx={{
               textTransform: "none",
-              color: "#64748B",
               fontSize: "0.9375rem",
-              "&:hover": {
-                backgroundColor: "rgba(255, 107, 157, 0.08)",
-                color: "#FF6B9D",
-              },
+              color: allNotesRevealed ? "#64748B" : "#94A3B8",
+              "&:hover": allNotesRevealed
+                ? {
+                    backgroundColor: "rgba(255, 107, 157, 0.08)",
+                    color: "#FF6B9D",
+                  }
+                : undefined,
             }}
           >
-            ← End retro
+            {allNotesRevealed
+              ? "← End retro"
+              : `← End retro (open ${remainingCount} more)`}
           </Button>
+
+          {!allNotesRevealed && (
+            <Typography sx={{ mt: 1, color: "#94A3B8", fontSize: "0.85rem" }}>
+              You can end the retro only after all notes are revealed.
+            </Typography>
+          )}
         </Box>
       </Container>
     </Box>

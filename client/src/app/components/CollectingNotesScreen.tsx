@@ -28,6 +28,7 @@ import {
   Copy,
   HelpCircle,
 } from "lucide-react";
+import { getClientId } from "@/clientId";
 
 const API_BASE = import.meta.env.VITE_API_BASE ?? "http://localhost:3000";
 
@@ -108,11 +109,14 @@ export function CollectingNotesScreen({
 
         const noteRes = await fetch(`${API_BASE}/teams/${teamCode}/notes`, {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: {
+            "Content-Type": "application/json",
+            "x-client-id": getClientId(),
+          },
           body: JSON.stringify({
             type: topic,
             authorName: name.trim() || "Anonymous",
-            content: content.trim(), // ✅ חדש
+            content: content.trim(),
             imageUrl,
             anonymous: !name.trim() || name.trim() === "Anonymous",
           }),
