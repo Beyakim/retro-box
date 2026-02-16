@@ -950,7 +950,7 @@ app.post("/teams/:teamCode/notes", async (req, res) => {
         activeBox.id,
         type,
         authorName || null,
-        content || null,
+        content || "",
         imageUrl || null,
         anonymous,
       ],
