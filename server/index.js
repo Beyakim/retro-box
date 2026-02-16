@@ -50,6 +50,19 @@ if (!fs.existsSync(uploadsDir)) {
 
 const app = express();
 app.use("/uploads", express.static(uploadsDir));
+app.get("/debug/uploads", (req, res) => {
+  try {
+    const exists = fs.existsSync(uploadsDir);
+    const files = exists ? fs.readdirSync(uploadsDir).slice(0, 20) : [];
+    res.json({
+      uploadsDir,
+      exists,
+      sampleFiles: files,
+    });
+  } catch (e) {
+    res.status(500).json({ error: String(e) });
+  }
+});
 
 const httpServer = createServer(app);
 const io = new Server(httpServer, {
