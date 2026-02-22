@@ -179,6 +179,9 @@ async function getActiveBoxByTeamId(teamId) {
 async function ensureActiveBoxByTeamId(teamId) {
   const existing = await db.query(
     `SELECT id, team_id AS "teamId", status,
+            host_client_id AS "hostClientId",
+            current_note_id AS "currentNoteId",
+            pull_mode AS "pullMode",
             retro_number AS "retroNumber",
             created_at AS "createdAt",
             closed_at AS "closedAt"
@@ -204,19 +207,17 @@ async function ensureActiveBoxByTeamId(teamId) {
     `INSERT INTO public.boxes (team_id, status, retro_number)
      VALUES ($1, 'collecting', $2)
      RETURNING id, team_id AS "teamId", status,
+               host_client_id AS "hostClientId",
+               current_note_id AS "currentNoteId",
+               pull_mode AS "pullMode",
                retro_number AS "retroNumber",
                created_at AS "createdAt",
                closed_at AS "closedAt"`,
     [teamId, nextRetroNumber],
   );
 
-  console.log(
-    `📦 ensureActiveBoxByTeamId: created collecting box #${nextRetroNumber} for teamId=${teamId}`,
-  );
-
   return insertRes.rows[0];
 }
-
 /* =========================================================
    Health
    ========================================================= */
@@ -626,7 +627,13 @@ app.post("/teams/:teamCode/retro/pull-next", async (req, res) => {
   const teamCode = asTrimmedString(req.params.teamCode);
   if (!teamCode) return res.status(400).json({ error: "teamCode_is_required" });
 
-  const clientId = req.body?.clientId || req.headers["x-client-id"];
+  const headerClientId = req.headers["x-client-id"];
+  const clientId =
+    asTrimmedString(req.body?.clientId) ||
+    (Array.isArray(headerClientId)
+      ? headerClientId[0]
+      : asTrimmedString(headerClientId));
+
   if (!clientId) return res.status(400).json({ error: "clientId_is_required" });
 
   const client = await db.connect();
@@ -670,17 +677,33 @@ app.post("/teams/:teamCode/retro/pull-next", async (req, res) => {
         .json({ error: "retro_not_in_progress", status: box.status });
     }
 
+    // ✅ CLAIM HOST if none exists (prevents stuck retro when host disconnected)
+    if (!box.hostClientId) {
+      const claim = await client.query(
+        `UPDATE public.boxes
+     SET host_client_id = $1
+     WHERE id = $2 AND host_client_id IS NULL
+     RETURNING host_client_id AS "hostClientId"`,
+        [clientId, box.id],
+      );
+
+      // אם מישהו אחר תפס ממש באותו רגע
+      box.hostClientId = claim.rows[0]?.hostClientId ?? box.hostClientId;
+
+      console.log(
+        `👑 Host claimed by ${box.hostClientId} for box ${box.id} (${teamCode})`,
+      );
+    }
+
     if (box.hostClientId !== clientId) {
       await client.query("ROLLBACK");
       console.log(
         `❌ Non-host ${clientId} tried to pull note (host is ${box.hostClientId})`,
       );
-      return res
-        .status(403)
-        .json({
-          error: "not_host",
-          message: "Only the facilitator can pull notes",
-        });
+      return res.status(403).json({
+        error: "not_host",
+        message: "Only the facilitator can pull notes",
+      });
     }
 
     const pullMode = box.pullMode || "sequential";
@@ -1131,15 +1154,68 @@ app.use((err, req, res, next) => {
 });
 
 io.on("connection", (socket) => {
-  console.log("Client connected:", socket.id);
+  const clientId = socket.handshake.auth?.clientId;
+  socket.data.clientId = clientId;
+  socket.data.joinedTeams = new Set();
+
+  console.log("Client connected:", socket.id, "clientId:", clientId);
 
   socket.on("join-team", (teamCode) => {
     socket.join(teamCode);
-    console.log(`Socket ${socket.id} joined team ${teamCode}`);
+    socket.data.joinedTeams.add(teamCode);
+
+    console.log(
+      `Socket ${socket.id} (clientId=${socket.data.clientId}) joined team ${teamCode}`,
+    );
   });
 
-  socket.on("disconnect", () => {
-    console.log("Client disconnected:", socket.id);
+  socket.on("disconnect", async () => {
+    const cid = socket.data.clientId;
+
+    console.log("Client disconnected:", socket.id, "clientId:", cid);
+
+    if (!cid) return;
+
+    const teams = [...(socket.data.joinedTeams || [])];
+
+    for (const teamCode of teams) {
+      try {
+        // אם מי שהתנתק הוא ה-host של רטרו פעיל — נשחרר host
+        const updated = await db.query(
+          `
+          UPDATE public.boxes b
+          SET host_client_id = NULL
+          WHERE b.team_id = (SELECT id FROM public.teams WHERE team_code = $1)
+            AND b.status = 'in_retro'
+            AND b.host_client_id = $2
+          RETURNING b.id
+          `,
+          [teamCode, cid],
+        );
+
+        if (updated.rowCount > 0) {
+          const boxId = updated.rows[0].id;
+
+          const countRes = await db.query(
+            `SELECT COUNT(*)::int AS remaining
+             FROM public.notes
+             WHERE box_id = $1 AND opened = false`,
+            [boxId],
+          );
+          const remainingCount = countRes.rows[0]?.remaining ?? 0;
+
+          console.log(`👑 Host released for team ${teamCode} (box ${boxId})`);
+
+          // משדרים שה-host התפנה → כדי שהקליינט יציג כפתור "Become facilitator"
+          io.to(teamCode).emit("current-note-changed", {
+            currentNote: null,
+            retro: { remainingCount, hostClientId: null },
+          });
+        }
+      } catch (e) {
+        console.error("Failed to release host on disconnect:", e);
+      }
+    }
   });
 });
 
